@@ -1,0 +1,25 @@
+[project]
+name = "xtensor"
+version = "0.1.0"
+description = "Lightweight DataTensor wrapper that mimics a subset of xarray.DataArray APIs on top of torch.Tensor."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Codex Assistant"}
+]
+dependencies = [
+  "numpy>=1.23",
+  "pandas>=1.5",
+  "torch>=1.13",
+  "xarray>=2023.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+]
+
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"

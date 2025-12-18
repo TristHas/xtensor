@@ -1,0 +1,27 @@
+xtensor.egg-info/*
+
+# --------------------
+# Python build artifacts
+# --------------------
+__pycache__/
+*.py[cod]
+
+# --------------------
+# Packaging / setuptools
+# --------------------
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --------------------
+# Jupyter / IPython
+# --------------------
+.ipynb_checkpoints/
+
+# --------------------
+# Editor / OS junk (optional but recommended)
+# --------------------
+.DS_Store
+*.swp
+*.swo
