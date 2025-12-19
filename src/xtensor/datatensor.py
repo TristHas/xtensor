@@ -6,20 +6,39 @@ import numpy as np
 import torch
 
 CoordValue = Union[Sequence[Any], np.ndarray, torch.Tensor]
+CoordArray = Union[torch.Tensor, Tuple[Any, ...]]
+
+_DTYPE_MAP = {
+    "float64": torch.float64,
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "float": torch.float32,
+    "double": torch.float64,
+    "half": torch.float16,
+    "bfloat16": torch.bfloat16 if hasattr(torch, "bfloat16") else torch.float32,
+    "int64": torch.int64,
+    "int32": torch.int32,
+    "int16": torch.int16,
+    "int8": torch.int8,
+    "uint8": torch.uint8,
+    "bool": torch.bool,
+}
 
 def _to_tensor(data: Union[np.ndarray, torch.Tensor, Sequence[Any]]) -> torch.Tensor:
     if isinstance(data, torch.Tensor):
         return data.clone()
     return torch.as_tensor(data)
 
-def _to_coord_tuple(values: Optional[CoordValue], size: int, dim: str) -> Tuple[Any, ...]:
+def _to_coord_array(values: Optional[CoordValue], size: int, dim: str, *, device: torch.device) -> CoordArray:
     if values is None:
-        return tuple(range(size))
+        return torch.arange(size, device=device, dtype=torch.float64)
 
-    array = None
     if isinstance(values, torch.Tensor):
-        array = values.detach().cpu().numpy()
-    elif isinstance(values, np.ndarray):
+        if values.ndim != 1 or values.shape[0] != size:
+            raise ValueError(f"Coordinate length mismatch on dim '{dim}'. Expected {size}, got {values.shape[0]}")
+        return values.to(device=device)
+
+    if isinstance(values, np.ndarray):
         array = values
     elif hasattr(values, "to_numpy"):
         array = values.to_numpy()
@@ -29,9 +48,18 @@ def _to_coord_tuple(values: Optional[CoordValue], size: int, dim: str) -> Tuple[
     if array.ndim != 1 or array.shape[0] != size:
         raise ValueError(f"Coordinate length mismatch on dim '{dim}'. Expected {size}, got {array.shape[0]}")
 
-    if array.dtype == object:
-        return tuple(array.tolist())
-    return tuple(array)
+    kind = array.dtype.kind
+    if kind in ("f", "i", "u", "b"):
+        return torch.as_tensor(array, device=device)
+    if kind == "M":
+        import pandas as pd
+
+        return tuple(pd.to_datetime(array).to_pydatetime())
+    if kind == "m":
+        import pandas as pd
+
+        return tuple(pd.to_timedelta(array))
+    return tuple(array.tolist())
 
 def _as_list(value: Any) -> Sequence[Any]:
     if isinstance(value, torch.Tensor):
@@ -42,25 +70,52 @@ def _as_list(value: Any) -> Sequence[Any]:
         return list(value)
     return [value]
 
+def _resolve_dtype(value: Union[str, np.dtype, torch.dtype, type, None]) -> Optional[torch.dtype]:
+    if value is None:
+        return None
+    if isinstance(value, torch.dtype):
+        return value
+    if isinstance(value, np.dtype):
+        key = value.name
+    elif isinstance(value, type):
+        try:
+            key = np.dtype(value).name
+        except TypeError:
+            key = value.__name__
+    else:
+        key = str(value)
+    key = key.lower()
+    if key.startswith("torch."):
+        key = key.split(".", 1)[1]
+    return _DTYPE_MAP.get(key)
+
 class DataTensor:
     """Minimal xarray.DataArray inspired wrapper around torch.Tensor."""
 
     __array_priority__ = 1000
 
-    def __init__(self, data: Union[np.ndarray, torch.Tensor, Sequence[Any]], coords: Mapping[str, CoordValue], dims: Sequence[str]):
+    def __init__(
+        self,
+        data: Union[np.ndarray, torch.Tensor, Sequence[Any]],
+        coords: Mapping[str, CoordValue],
+        dims: Sequence[str],
+        *,
+        attrs: Optional[Mapping[str, Any]] = None,
+    ):
         tensor = _to_tensor(data)
         dims = tuple(dims)
         if tensor.ndim != len(dims):
             raise ValueError(f"Expected dims of length {tensor.ndim}, received {len(dims)}")
 
-        normalized_coords: Dict[str, Tuple[Any, ...]] = {}
+        normalized_coords: Dict[str, CoordArray] = {}
         for dim, size in zip(dims, tensor.shape):
             coord_values = coords.get(dim)
-            normalized_coords[dim] = _to_coord_tuple(coord_values, size, dim)
+            normalized_coords[dim] = _to_coord_array(coord_values, size, dim, device=tensor.device)
 
         self._data = tensor
         self._dims = dims
         self._coords = normalized_coords
+        self._attrs: Dict[str, Any] = dict(attrs or {})
 
     @property
     def data(self) -> torch.Tensor:
@@ -75,8 +130,14 @@ class DataTensor:
         return self._dims
 
     @property
-    def coords(self) -> Dict[str, Tuple[Any, ...]]:
-        return dict(self._coords)
+    def coords(self) -> Dict[str, CoordArray]:
+        cloned: Dict[str, CoordArray] = {}
+        for dim, values in self._coords.items():
+            if isinstance(values, torch.Tensor):
+                cloned[dim] = values.clone()
+            else:
+                cloned[dim] = tuple(values)
+        return cloned
 
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -85,6 +146,10 @@ class DataTensor:
     @property
     def sizes(self) -> Dict[str, int]:
         return {dim: self._data.shape[idx] for idx, dim in enumerate(self._dims)}
+
+    @property
+    def attrs(self) -> Dict[str, Any]:
+        return dict(self._attrs)
 
     @staticmethod
     def from_pandas(obj: Any, dims: Optional[Sequence[str]] = None) -> "DataTensor":
@@ -161,7 +226,7 @@ class DataTensor:
 
     def to(self, *args: Any, **kwargs: Any) -> "DataTensor":
         moved = self._data.to(*args, **kwargs)
-        return DataTensor(moved, self._coords, self._dims)
+        return self._new(data=moved)
 
     def transpose(self, *dims: str) -> "DataTensor":
         if not dims:
@@ -171,7 +236,7 @@ class DataTensor:
         perm = [self._dims.index(dim) for dim in dims]
         data = self._data.permute(*perm)
         coords = {dim: self._coords[dim] for dim in dims}
-        return DataTensor(data, coords, dims)
+        return self._new(data=data, coords=coords, dims=dims)
 
     def expand_dims(
         self,
@@ -201,7 +266,7 @@ class DataTensor:
             coord_tuple = _to_coord_tuple(coord_values, 1, dim) if coord_values is not None else (0,)
             new_coords[dim] = coord_tuple
 
-        return DataTensor(data, new_coords, tuple(new_dims))
+        return self._new(data=data, coords=new_coords, dims=tuple(new_dims))
 
     def squeeze(self, dims: Optional[Union[str, Sequence[str]]] = None) -> "DataTensor":
         if dims is None:
@@ -226,7 +291,43 @@ class DataTensor:
 
         new_dims = tuple(dim for dim in self._dims if dim not in target_dims)
         new_coords = {dim: self._coords[dim] for dim in new_dims}
-        return DataTensor(data, new_coords, new_dims)
+        return self._new(data=data, coords=new_coords, dims=new_dims)
+
+    def assign_coords(self, **coords: CoordValue) -> "DataTensor":
+        if not coords:
+            return self
+        updated = dict(self._coords)
+        for dim, values in coords.items():
+            if dim not in self._dims:
+                raise ValueError(f"Dimension '{dim}' not present in DataTensor.")
+            updated[dim] = _to_coord_array(values, self.sizes[dim], dim, device=self._data.device)
+        return self._new(coords=updated)
+
+    def rename(self, dims: Optional[Mapping[str, str]] = None, **names: str) -> "DataTensor":
+        mapping = dict(dims or {})
+        mapping.update(names)
+        if not mapping:
+            return self
+        new_dims = []
+        new_coords: Dict[str, torch.Tensor] = {}
+        for dim in self._dims:
+            new_dim = mapping.get(dim, dim)
+            if new_dim in new_coords:
+                raise ValueError(f"Duplicate dimension '{new_dim}' after rename.")
+            new_dims.append(new_dim)
+            new_coords[new_dim] = self._coords[dim]
+        return self._new(dims=tuple(new_dims), coords=new_coords)
+
+    def astype(self, dtype: Union[str, np.dtype, torch.dtype]) -> "DataTensor":
+        resolved = _resolve_dtype(dtype)
+        if resolved is None:
+            raise TypeError(f"Unsupported dtype {dtype!r}")
+        converted = self._data.to(dtype=resolved)
+        return self._new(data=converted)
+
+    def reset_coords(self, drop: bool = False) -> "DataTensor":
+        # xtensor currently only tracks dimension coordinates, so resetting is a no-op.
+        return self._new()
 
     def to_dataarray(self):
         try:
@@ -234,31 +335,66 @@ class DataTensor:
         except ImportError as error:  # pragma: no cover
             raise RuntimeError("xarray must be installed to export to DataArray.") from error
 
-        coords = {dim: np.asarray(values) for dim, values in self._coords.items()}
+        def _coord_to_numpy(values):
+            if isinstance(values, torch.Tensor):
+                return values.detach().cpu().numpy()
+            arr = np.asarray(values)
+            if arr.size:
+                first = arr.reshape(-1)[0]
+                if isinstance(first, np.datetime64):
+                    return pd.DatetimeIndex(np.asarray(values, dtype="datetime64[ns]"))
+                if isinstance(first, np.timedelta64):
+                    return pd.TimedeltaIndex(np.asarray(values, dtype="timedelta64[ns]"))
+            return arr
+
+        coords = {dim: _coord_to_numpy(values) for dim, values in self._coords.items()}
         data = self._data.detach().cpu().numpy()
         return xr.DataArray(data, dims=self._dims, coords=coords)
 
     def to_pandas(self):
         import pandas as pd
 
+        def _index_from_coords(values, name):
+            if isinstance(values, torch.Tensor):
+                data = values.detach().cpu().numpy()
+                return pd.Index(data, name=name)
+            try:
+                return pd.DatetimeIndex(values, name=name)
+            except (TypeError, ValueError):
+                pass
+            try:
+                return pd.TimedeltaIndex(values, name=name)
+            except (TypeError, ValueError):
+                pass
+            return pd.Index(np.asarray(values), name=name)
+
         if len(self._dims) == 1:
             dim = self._dims[0]
-            index = pd.Index(self._coords[dim], name=dim)
+            index = _index_from_coords(self._coords[dim], dim)
             data = self._data.detach().cpu().numpy()
             return pd.Series(data, index=index)
 
         if len(self._dims) == 2:
             row_dim, col_dim = self._dims
-            index = pd.Index(self._coords[row_dim], name=row_dim)
-            columns = pd.Index(self._coords[col_dim], name=col_dim)
+            index = _index_from_coords(self._coords[row_dim], row_dim)
+            columns = _index_from_coords(self._coords[col_dim], col_dim)
             data = self._data.detach().cpu().numpy()
             return pd.DataFrame(data, index=index, columns=columns)
 
         raise ValueError("to_pandas only supports tensors with one or two dimensions.")
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
-        coord_str = ", ".join(f"{dim}: {vals[:3]}..." if len(vals) > 3 else f"{dim}: {vals}" for dim, vals in self._coords.items())
-        return f"DataTensor(shape={self.shape}, dims={self._dims}, coords={{ {coord_str} }})"
+        try:
+            return self.to_xarray().__repr__()
+        except Exception:  # fallback to a lightweight summary
+            coord_summary = ", ".join(f"{dim}: {len(vals)}" for dim, vals in self._coords.items())
+            return f"DataTensor(shape={self.shape}, dims={self._dims}, coords=[{coord_summary}])"
+
+    def _repr_html_(self):
+        try:
+            return self.to_xarray()._repr_html_()
+        except Exception:
+            return None
 
     # Elementwise math -------------------------------------------------
     def _binary_op(self, other: Any, op: Callable[[torch.Tensor, Any], torch.Tensor], op_name: str) -> "DataTensor":
@@ -272,19 +408,24 @@ class DataTensor:
             result = op(self._data, other)
             coords = self._coords
             dims = self._dims
-        return DataTensor(result, coords, dims)
+        return self._new(data=result, coords=coords, dims=dims)
 
-    def _merge_coords(self, other: "DataTensor", op_name: str) -> Dict[str, Tuple[Any, ...]]:
-        merged: Dict[str, Tuple[Any, ...]] = {}
+    def _merge_coords(self, other: "DataTensor", op_name: str) -> Dict[str, CoordArray]:
+        merged: Dict[str, CoordArray] = {}
         for dim in self._dims:
             coords_a = self._coords[dim]
             coords_b = other.coords[dim]
             len_a = len(coords_a)
             len_b = len(coords_b)
             if len_a == len_b:
-                if coords_a != coords_b:
-                    raise ValueError(f"{op_name} requires matching coordinates on dim '{dim}'.")
-                merged[dim] = coords_a
+                if isinstance(coords_a, torch.Tensor) and isinstance(coords_b, torch.Tensor):
+                    if not torch.allclose(coords_a, coords_b):
+                        raise ValueError(f"{op_name} requires matching coordinates on dim '{dim}'.")
+                    merged[dim] = coords_a
+                else:
+                    if tuple(coords_a) != tuple(coords_b):
+                        raise ValueError(f"{op_name} requires matching coordinates on dim '{dim}'.")
+                    merged[dim] = coords_a
             elif len_a == 1:
                 merged[dim] = coords_b
             elif len_b == 1:
@@ -352,7 +493,7 @@ class DataTensor:
                 new_coords.pop(dim, None)
         else:
             new_coords = {dim: self._coords[dim] for dim in new_dims}
-        return DataTensor(reduced, new_coords, new_dims)
+        return self._new(data=reduced, coords=new_coords, dims=new_dims)
 
     def _dims_to_axes(self, dim: Optional[Union[str, Sequence[str]]]) -> Optional[Sequence[int]]:
         if dim is None:
@@ -371,7 +512,7 @@ class DataTensor:
 
         index_tuple: list[Any] = []
         new_dims: list[str] = []
-        new_coords: Dict[str, Tuple[Any, ...]] = {}
+        new_coords: Dict[str, CoordArray] = {}
 
         for axis, dim in enumerate(self._dims):
             axis_coords = self._coords[dim]
@@ -388,9 +529,9 @@ class DataTensor:
                 new_coords[dim] = axis_coords
 
         data = self._data[tuple(index_tuple)]
-        return DataTensor(data, new_coords, tuple(new_dims))
+        return self._new(data=data, coords=new_coords, dims=tuple(new_dims))
 
-    def _normalize_indexer(self, axis_coords: Tuple[Any, ...], selector: Any, use_coords: bool):
+    def _normalize_indexer(self, axis_coords: CoordArray, selector: Any, use_coords: bool):
         if isinstance(selector, slice):
             if use_coords:
                 start = self._coord_to_index(axis_coords, selector.start) if selector.start is not None else 0
@@ -400,7 +541,8 @@ class DataTensor:
             else:
                 idx = selector
             selected_coords = axis_coords[idx]
-            return idx, tuple(selected_coords), False
+            selected = selected_coords.clone() if isinstance(selected_coords, torch.Tensor) else tuple(selected_coords)
+            return idx, selected, False
 
         values = _as_list(selector)
 
@@ -411,16 +553,48 @@ class DataTensor:
 
         if len(indices) == 1 and not isinstance(selector, (list, tuple, np.ndarray, torch.Tensor)):
             idx_value = indices[0]
-            coord_value = axis_coords[idx_value]
-            return idx_value, tuple([coord_value]), True
+            coord_value = axis_coords[idx_value] if isinstance(axis_coords, torch.Tensor) else axis_coords[idx_value]
+            if isinstance(axis_coords, torch.Tensor):
+                coord_tensor = axis_coords.new_tensor([coord_value])
+            else:
+                coord_tensor = (coord_value,)
+            return idx_value, coord_tensor, True
 
         tensor_index = torch.as_tensor(indices, dtype=torch.long, device=self._data.device)
-        coord_values = tuple(axis_coords[i] for i in indices)
+        if isinstance(axis_coords, torch.Tensor):
+            coord_values = axis_coords[tensor_index]
+        else:
+            coord_values = tuple(axis_coords[i] for i in indices)
         return tensor_index, coord_values, False
 
     @staticmethod
-    def _coord_to_index(axis_coords: Tuple[Any, ...], value: Any) -> int:
+    def _coord_to_index(axis_coords: CoordArray, value: Any) -> int:
+        if isinstance(axis_coords, torch.Tensor):
+            matches = torch.nonzero(axis_coords == value, as_tuple=False)
+            if matches.numel() == 0:
+                raise KeyError(f"Coordinate value '{value}' not found.")
+            return int(matches[0].item())
         try:
             return axis_coords.index(value)
         except ValueError as error:
             raise KeyError(f"Coordinate value '{value}' not found.") from error
+
+    def item(self) -> Any:
+        if self._data.numel() != 1:
+            raise ValueError("Only scalar DataTensor instances support .item().")
+        return self._data.item()
+
+    def _new(
+        self,
+        *,
+        data: Optional[torch.Tensor] = None,
+        coords: Optional[Mapping[str, CoordArray]] = None,
+        dims: Optional[Sequence[str]] = None,
+        attrs: Optional[Mapping[str, Any]] = None,
+    ) -> "DataTensor":
+        obj = self.__class__.__new__(self.__class__)
+        obj._data = data if data is not None else self._data
+        obj._dims = tuple(dims) if dims is not None else self._dims
+        obj._coords = dict(coords) if coords is not None else dict(self._coords)
+        obj._attrs = dict(attrs) if attrs is not None else dict(self._attrs)
+        return obj
