@@ -26,7 +26,7 @@ _DTYPE_MAP = {
 
 def _to_tensor(data: Union[np.ndarray, torch.Tensor, Sequence[Any]]) -> torch.Tensor:
     if isinstance(data, torch.Tensor):
-        return data.clone()
+        return data#.clone()
     return torch.as_tensor(data)
 
 def _to_coord_array(values: Optional[CoordValue], size: int, dim: str, *, device: torch.device) -> CoordArray:
@@ -124,6 +124,10 @@ class DataTensor:
     @property
     def values(self) -> torch.Tensor:
         return self._data
+
+    @property
+    def device(self) -> torch.device:
+        return self._data.device
 
     @property
     def dims(self) -> Tuple[str, ...]:
@@ -226,7 +230,13 @@ class DataTensor:
 
     def to(self, *args: Any, **kwargs: Any) -> "DataTensor":
         moved = self._data.to(*args, **kwargs)
-        return self._new(data=moved)
+        updated_coords: Dict[str, CoordArray] = {}
+        for dim, values in self._coords.items():
+            if isinstance(values, torch.Tensor):
+                updated_coords[dim] = values.to(*args, **kwargs)
+            else:
+                updated_coords[dim] = values
+        return self._new(data=moved, coords=updated_coords)
 
     def transpose(self, *dims: str) -> "DataTensor":
         if not dims:
