@@ -15,7 +15,10 @@ DataVarInput = Union[
 ]
 
 def _to_coord_tuple(values: CoordValue, size: int, dim: str) -> Tuple[Any, ...]:
-    array = np.asarray(values)
+    if isinstance(values, torch.Tensor):
+        array = values.detach().cpu().numpy()
+    else:
+        array = np.asarray(values)
     if array.ndim != 1 or array.shape[0] != size:
         raise ValueError(f"Coordinate length mismatch on dim '{dim}'. Expected {size}, got {array.shape[0]}")
     return tuple(array.tolist())
@@ -67,14 +70,13 @@ class Dataset:
 
     def __init__(
         self,
-        data_vars: Mapping[str, DataVarInput],
+        data_vars: Optional[Mapping[str, DataVarInput]] = None,
         *,
         coords: Optional[Mapping[str, CoordValue]] = None,
         attrs: Optional[Mapping[str, Any]] = None,
     ):
-        if not data_vars:
-            raise ValueError("Dataset requires at least one data variable.")
         self._data_vars: MutableMapping[str, DataTensor] = OrderedDict()
+        data_vars = data_vars or {}
         explicit_coords = dict(coords or {})
         for name, value in data_vars.items():
             self._data_vars[name] = self._convert_to_datatensor(name, value, explicit_coords)
@@ -82,10 +84,15 @@ class Dataset:
         for dim, values in explicit_coords.items():
             if dim in self._coords:
                 size = len(self._coords[dim])
-                self._coords[dim] = _to_coord_tuple(values, size, dim)
             else:
-                inferred = self._infer_dim_size(dim)
-                self._coords[dim] = _to_coord_tuple(values, inferred, dim)
+                try:
+                    size = self._infer_dim_size(dim)
+                except ValueError:
+                    try:
+                        size = len(values)  # type: ignore[arg-type]
+                    except TypeError as error:
+                        raise ValueError(f"Cannot determine length for coordinate '{dim}'.") from error
+            self._coords[dim] = _to_coord_tuple(values, size, dim)
         self._dim_order = self._compute_dim_order(self._data_vars)
         self._attrs = dict(attrs or {})
 
@@ -101,9 +108,18 @@ class Dataset:
             coord_tensor = self._convert_to_datatensor(key, value, self._coords)
             self._assign_coord(key, coord_tensor)
             return
+        current_coords = OrderedDict(self._coords)
         tensor = self._convert_to_datatensor(key, value, self._coords)
         self._data_vars[key] = tensor
-        self._coords = self._coords_from_data_vars(self._data_vars, base_coords=self._coords)
+        present_dims = set(self._collect_dims(self._data_vars))
+        extra_coords = OrderedDict(
+            (dim, values) for dim, values in current_coords.items() if dim not in present_dims
+        )
+        self._coords = self._coords_from_data_vars(
+            self._data_vars,
+            base_coords=current_coords,
+            extra_coords=extra_coords or None,
+        )
         self._promote_coordinate_if_needed(key, tensor)
 
     def __contains__(self, key: str) -> bool:
@@ -149,7 +165,13 @@ class Dataset:
         normalized = OrderedDict(self._coords)
         new_vars = OrderedDict()
         for dim, values in coords.items():
-            size = self._infer_dim_size(dim)
+            try:
+                size = self._infer_dim_size(dim)
+            except ValueError:
+                try:
+                    size = len(values)  # type: ignore[arg-type]
+                except TypeError as error:
+                    raise ValueError(f"Cannot determine length for coordinate '{dim}'.") from error
             normalized[dim] = _to_coord_tuple(values, size, dim)
         for name, var in self._data_vars.items():
             updates = {dim: normalized[dim] for dim in var.dims if dim in coords}
@@ -217,6 +239,14 @@ class Dataset:
         }
         return self._replace(data_vars=new_vars, recompute_coords=True, extra_coords=preserved or None)
 
+    def to(self, *args: Any, **kwargs: Any) -> "Dataset":
+        if not self._data_vars:
+            return self
+        moved = OrderedDict()
+        for name, var in self._data_vars.items():
+            moved[name] = var.to(*args, **kwargs)
+        return self._replace(data_vars=moved, recompute_coords=True)
+
     def to_xarray(self):
         try:
             import xarray as xr
@@ -228,7 +258,10 @@ class Dataset:
         ds = xr.Dataset(data_vars)
         dim_names = set(self.dims.keys())
         for dim, values in self._coords.items():
-            array = np.asarray(values)
+            if isinstance(values, torch.Tensor):
+                array = values.cpu().detach().numpy()
+            else:
+                array = np.asarray(values)
             if dim in dim_names:
                 ds = ds.assign_coords({dim: array})
             else:
@@ -278,10 +311,17 @@ class Dataset:
         if coords is not None:
             obj._coords = OrderedDict(coords)
         elif recompute_coords:
+            base_coords = getattr(self, "_coords", None)
+            merged_extra: OrderedDict[str, Any] = OrderedDict(extra_coords or {})
+            if base_coords:
+                present_dims = set(self._collect_dims(obj._data_vars))
+                for dim, values in base_coords.items():
+                    if dim not in present_dims and dim not in merged_extra:
+                        merged_extra[dim] = values
             obj._coords = self._coords_from_data_vars(
                 obj._data_vars,
-                base_coords=getattr(self, "_coords", None),
-                extra_coords=extra_coords,
+                base_coords=base_coords,
+                extra_coords=merged_extra or None,
             )
         else:
             obj._coords = OrderedDict(self._coords)
