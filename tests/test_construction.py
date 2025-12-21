@@ -38,3 +38,21 @@ def test_from_pandas_series_and_dataframe():
     tensor_df = DataTensor.from_pandas(df)
     assert tensor_df.dims == ("col", "row")
     np.testing.assert_allclose(tensor_df.data.numpy(), df.to_numpy().T)
+
+
+def test_datatensor_device_property():
+    data = torch.ones((2, 2), device=torch.device("cpu"))
+    tensor = DataTensor(data, {"x": [0, 1], "y": [0, 1]}, ("x", "y"))
+    assert tensor.device == data.device
+
+
+def test_datatensor_to_updates_coord_tensors():
+    data = torch.arange(5, dtype=torch.float64)
+    coords = {"x": torch.arange(5, dtype=torch.float64)}
+    tensor = DataTensor(data, coords, ("x",))
+    converted = tensor.to(dtype=torch.float32)
+
+    assert converted.data.dtype == torch.float32
+    coord = converted.coords["x"]
+    assert isinstance(coord, torch.Tensor)
+    assert coord.dtype == torch.float32

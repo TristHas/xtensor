@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import xarray as xr
 import torch
 
@@ -61,3 +62,47 @@ def test_dataset_coordinate_precedence(base_dataset):
     coord = ds["time"]
     torch.testing.assert_close(coord.data, coord_values + 1.0)
     torch.testing.assert_close(ds.data_vars["new_time"].data, coord_values + 1.0)
+
+
+def test_dataset_initializes_with_coordinates_only():
+    coords = {
+        "time": np.linspace(0.0, 4.0, 5),
+        "level": np.array([1000.0, 850.0, 700.0]),
+    }
+    ds = Dataset({}, coords=coords)
+    assert tuple(ds.coords["time"]) == tuple(coords["time"])
+    assert tuple(ds.coords["level"]) == tuple(coords["level"])
+
+    ds["temp"] = (("time",), np.arange(5.0))
+    assert "temp" in ds.data_vars
+    assert tuple(ds.coords["level"]) == tuple(coords["level"])
+
+    ds["pressure"] = (("level",), np.linspace(0.0, 1.0, 3))
+    torch.testing.assert_close(ds["pressure"].coords["level"], torch.as_tensor(coords["level"]))
+
+
+def test_dataset_to_matches_xarray(base_dataset):
+    ds = Dataset.from_xarray(base_dataset)
+    xt_fp32 = ds.to(dtype=torch.float32)
+    xr_fp32 = base_dataset.astype(np.float32)
+
+    _assert_identical(xt_fp32, xr_fp32)
+    assert ds["temp"].data.dtype == torch.float64
+
+
+def test_assign_coords_allows_new_dimension():
+    ds = Dataset({})
+    ds = ds.assign_coords(ens=np.arange(3))
+    assert tuple(ds.coords["ens"]) == (0.0, 1.0, 2.0)
+
+    ds["values"] = (("ens",), np.array([10.0, 20.0, 30.0]))
+    torch.testing.assert_close(ds["values"].coords["ens"], torch.arange(3, dtype=torch.int64))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for this test")
+def test_dataset_accepts_cuda_coordinate_inputs():
+    device = torch.device("cuda:0")
+    coords = {"obs": torch.arange(4, dtype=torch.float64, device=device)}
+    ds = Dataset({}, coords=coords)
+    assert tuple(ds.coords["obs"]) == (0.0, 1.0, 2.0, 3.0)
+    ds["values"] = (("obs",), np.ones(4))
