@@ -4,7 +4,7 @@ import pytest
 import torch
 import xarray as xr
 
-from xtensor import DataTensor
+from xtensor import DataTensor, Dataset
 
 
 def test_to_dataarray_roundtrip(base_array):
@@ -51,3 +51,22 @@ def test_dataarray_datetime_roundtrip():
     xr_round = tensor.to_dataarray()
     assert isinstance(xr_round.indexes["time"], pd.DatetimeIndex)
     assert xr_round.indexes["time"].equals(arr.indexes["time"])
+
+
+def test_open_dataarray(tmp_path, base_array):
+    path = tmp_path / "array.nc"
+    base_array.to_netcdf(path)
+    tensor = DataTensor.open_dataarray(path)
+    np.testing.assert_allclose(tensor.data.numpy(), base_array.data)
+    assert tensor.dims == base_array.dims
+
+
+def test_open_dataset(tmp_path, base_dataset):
+    path = tmp_path / "dataset.nc"
+    base_dataset.to_netcdf(path)
+    dataset = Dataset.open_dataset(path)
+    temp = dataset["temp"]
+    wind = dataset["wind"]
+    np.testing.assert_allclose(temp.data.numpy(), base_dataset["temp"].data)
+    np.testing.assert_allclose(wind.data.numpy(), base_dataset["wind"].data)
+    assert set(dataset.dims) == set(base_dataset.dims)

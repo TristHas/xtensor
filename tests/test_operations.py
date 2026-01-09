@@ -34,3 +34,22 @@ def test_operations_are_differentiable():
     loss.backward()
     torch.testing.assert_close(data_a.grad, data_b.detach())
     torch.testing.assert_close(data_b.grad, data_a.detach())
+
+
+def test_grad_returns_datatensor():
+    data = torch.arange(0.0, 6.0).reshape(2, 3).clone().detach().requires_grad_(True)
+    coords = {"x": [10.0, 20.0], "y": [0, 1, 2]}
+    tensor = DataTensor(data, coords, ("x", "y"))
+    loss = (tensor.data ** 2).sum()
+    loss.backward()
+    grad_tensor = tensor.grad
+    assert grad_tensor is not None
+    torch.testing.assert_close(grad_tensor.data, data.grad)
+    assert grad_tensor.dims == tensor.dims
+    for dim in tensor.dims:
+        coord = tensor.coords[dim]
+        grad_coord = grad_tensor.coords[dim]
+        if isinstance(coord, torch.Tensor):
+            torch.testing.assert_close(grad_coord, coord)
+        else:
+            assert grad_coord == coord

@@ -24,6 +24,7 @@ _DTYPE_MAP = {
     "bool": torch.bool,
 }
 
+
 def _to_tensor(data: Union[np.ndarray, torch.Tensor, Sequence[Any]]) -> torch.Tensor:
     if isinstance(data, torch.Tensor):
         return data#.clone()
@@ -89,6 +90,26 @@ def _resolve_dtype(value: Union[str, np.dtype, torch.dtype, type, None]) -> Opti
         key = key.split(".", 1)[1]
     return _DTYPE_MAP.get(key)
 
+
+def _expanded_indexer(key: Any, ndim: int) -> Tuple[Any, ...]:
+    if not isinstance(key, tuple):
+        key = (key,)
+    new_key: list[Any] = []
+    found_ellipsis = False
+    for item in key:
+        if item is Ellipsis:
+            if not found_ellipsis:
+                new_key.extend((ndim + 1 - len(key)) * [slice(None)])
+                found_ellipsis = True
+            else:
+                new_key.append(slice(None))
+        else:
+            new_key.append(item)
+    if len(new_key) > ndim:
+        raise IndexError("too many indices")
+    new_key.extend((ndim - len(new_key)) * [slice(None)])
+    return tuple(new_key)
+
 class DataTensor:
     """Minimal xarray.DataArray inspired wrapper around torch.Tensor."""
 
@@ -128,6 +149,13 @@ class DataTensor:
     @property
     def device(self) -> torch.device:
         return self._data.device
+
+    @property
+    def grad(self) -> Optional["DataTensor"]:
+        grad = self._data.grad
+        if grad is None:
+            return None
+        return DataTensor(grad, self.coords, self._dims)
 
     @property
     def dims(self) -> Tuple[str, ...]:
@@ -188,6 +216,19 @@ class DataTensor:
         dims = tuple(array.dims)
         coords = {dim: array.coords[dim].to_numpy() for dim in dims}
         return DataTensor(array.data, coords, dims)
+
+    @classmethod
+    def open_dataarray(cls, *args: Any, **kwargs: Any) -> "DataTensor":
+        try:
+            import xarray as xr
+        except ImportError as error:  # pragma: no cover
+            raise RuntimeError("xarray must be installed to open a DataArray.") from error
+
+        data_array = xr.open_dataarray(*args, **kwargs)
+        try:
+            return cls.from_dataarray(data_array)
+        finally:
+            data_array.close()
 
     def sel(self, **indexers: Any) -> "DataTensor":
         return self._select(indexers, use_coords=True)
@@ -392,6 +433,17 @@ class DataTensor:
             return pd.DataFrame(data, index=index, columns=columns)
 
         raise ValueError("to_pandas only supports tensors with one or two dimensions.")
+
+    def __getitem__(self, key: Any) -> "DataTensor":
+        if isinstance(key, str):
+            return self._coord_as_datatensor(key)
+
+        if isinstance(key, Mapping):
+            indexers = dict(key)
+        else:
+            expanded = _expanded_indexer(key, self._data.ndim)
+            indexers = {dim: sel for dim, sel in zip(self._dims, expanded)}
+        return self.isel(**indexers)
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         try:
@@ -608,3 +660,13 @@ class DataTensor:
         obj._coords = dict(coords) if coords is not None else dict(self._coords)
         obj._attrs = dict(attrs) if attrs is not None else dict(self._attrs)
         return obj
+
+    def _coord_as_datatensor(self, name: str) -> "DataTensor":
+        if name not in self._coords:
+            raise KeyError(name)
+        values = self._coords[name]
+        if isinstance(values, torch.Tensor):
+            data = values.clone()
+        else:
+            data = torch.as_tensor(list(values))
+        return DataTensor(data, {name: values}, (name,))

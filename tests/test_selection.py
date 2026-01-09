@@ -24,3 +24,32 @@ def test_selector_is_differentiable():
     expected = torch.zeros_like(data)
     expected[1, :] = 1.0
     torch.testing.assert_close(data.grad, expected)
+
+
+def test_getitem_matches_xarray(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+
+    xp_first = base_array[1]
+    xt_first = tensor[1]
+    np.testing.assert_allclose(xt_first.data.numpy(), xp_first.data)
+    assert xt_first.dims == xp_first.dims
+
+    xp_slice = base_array[:, 1]
+    xt_slice = tensor[:, 1]
+    np.testing.assert_allclose(xt_slice.data.numpy(), xp_slice.data)
+    assert xt_slice.dims == xp_slice.dims
+
+    xp_scalar = base_array[1, 2]
+    xt_scalar = tensor[1, 2]
+    assert xt_scalar.data.item() == xp_scalar.data.item()
+    assert xt_scalar.dims == xp_scalar.dims
+
+    xp_dict = base_array[{"x": slice(1, None), "y": [0, 2]}]
+    xt_dict = tensor[{"x": slice(1, None), "y": [0, 2]}]
+    np.testing.assert_allclose(xt_dict.data.numpy(), xp_dict.data)
+    assert xt_dict.dims == xp_dict.dims
+
+    xp_ellipsis = base_array[..., 1]
+    xt_ellipsis = tensor[..., 1]
+    np.testing.assert_allclose(xt_ellipsis.data.numpy(), xp_ellipsis.data)
+    assert xt_ellipsis.dims == xp_ellipsis.dims

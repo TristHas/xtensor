@@ -276,6 +276,19 @@ class Dataset:
         coords = {dim: dataset.coords[dim].to_numpy() for dim in dataset.dims if dim in dataset.coords}
         return Dataset(data_vars, coords=coords, attrs=dict(dataset.attrs))
 
+    @classmethod
+    def open_dataset(cls, *args: Any, **kwargs: Any) -> "Dataset":
+        try:
+            import xarray as xr
+        except ImportError as error:  # pragma: no cover
+            raise RuntimeError("xarray must be installed to open a Dataset.") from error
+
+        ds = xr.open_dataset(*args, **kwargs)
+        try:
+            return cls.from_xarray(ds)
+        finally:
+            ds.close()
+
     def _apply_indexers(self, method: str, indexers: Mapping[str, Any]) -> "Dataset":
         if not indexers:
             return self
