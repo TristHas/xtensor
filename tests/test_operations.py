@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from xtensor import DataTensor
@@ -53,3 +54,64 @@ def test_grad_returns_datatensor():
             torch.testing.assert_close(grad_coord, coord)
         else:
             assert grad_coord == coord
+
+
+def test_torch_elementwise_dispatch(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+    other = tensor + 1.0
+
+    added = torch.add(tensor, other)
+    torch.testing.assert_close(added.data, tensor.data + other.data)
+    assert added.dims == tensor.dims
+
+    scaled = torch.mul(tensor, 3.0)
+    torch.testing.assert_close(scaled.data, tensor.data * 3.0)
+
+    subtracted = torch.sub(other.data, tensor)
+    torch.testing.assert_close(subtracted.data, other.data - tensor.data)
+
+    divided = torch.true_divide(other, tensor + 2.0)
+    torch.testing.assert_close(divided.data, other.data / (tensor.data + 2.0))
+
+    pw = torch.pow(tensor, 2.0)
+    torch.testing.assert_close(pw.data, tensor.data ** 2)
+
+    minimum = torch.minimum(tensor, tensor + 5.0)
+    torch.testing.assert_close(minimum.data, tensor.data)
+
+
+def test_elementwise_aligns_dimension_order(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+    other = DataTensor.from_dataarray(base_array.transpose("y", "x"))
+    summed = tensor + other
+    np.testing.assert_allclose(summed.data.numpy(), (base_array + base_array).data)
+
+
+def test_elementwise_coordinate_mismatch_raises():
+    left = DataTensor(
+        torch.arange(4.0).reshape(2, 2),
+        {"x": [0, 1], "y": [10, 20]},
+        ("x", "y"),
+    )
+    right = DataTensor(
+        torch.arange(4.0).reshape(2, 2),
+        {"x": [0, 2], "y": [10, 20]},
+        ("x", "y"),
+    )
+    with pytest.raises(ValueError, match="requires matching coordinates"):
+        _ = left + right
+
+
+def test_elementwise_missing_dimension_raises():
+    base = DataTensor(
+        torch.arange(4.0).reshape(2, 2),
+        {"x": [0, 1], "y": [0, 1]},
+        ("x", "y"),
+    )
+    extra = DataTensor(
+        torch.arange(2.0),
+        {"x": [0, 1]},
+        ("x",),
+    )
+    with pytest.raises(ValueError, match="dimension set"):
+        _ = base + extra

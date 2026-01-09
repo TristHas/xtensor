@@ -45,6 +45,13 @@ def test_assign_coords_matches_xarray(base_array):
         assert coord == tuple(new_x)
 
 
+def test_reset_coords_drops_extra_coordinate(base_array):
+    tensor = DataTensor.from_dataarray(base_array).assign_coords(city="NYC")
+    assert "city" in tensor.coords
+    dropped = tensor.reset_coords(drop=True)
+    assert "city" not in dropped.coords
+
+
 def test_rename_and_astype_align_with_xarray(base_array):
     tensor = DataTensor.from_dataarray(base_array)
     renamed = tensor.rename({"x": "lon", "y": "lat"}).astype(np.float64)

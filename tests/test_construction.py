@@ -31,6 +31,8 @@ def test_from_pandas_series_and_dataframe():
     coord = tensor.coords["time"]
     if isinstance(coord, torch.Tensor):
         np.testing.assert_array_equal(coord.cpu().numpy(), np.array([0, 1, 2]))
+    elif hasattr(coord, "equals"):
+        assert coord.equals(series.index)
     else:
         assert coord == (0, 1, 2)
 

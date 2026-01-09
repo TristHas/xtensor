@@ -70,15 +70,41 @@ def test_dataset_initializes_with_coordinates_only():
         "level": np.array([1000.0, 850.0, 700.0]),
     }
     ds = Dataset({}, coords=coords)
-    assert tuple(ds.coords["time"]) == tuple(coords["time"])
-    assert tuple(ds.coords["level"]) == tuple(coords["level"])
+    def _as_tuple(value):
+        if isinstance(value, torch.Tensor):
+            return tuple(value.cpu().tolist())
+        return tuple(value)
+
+    assert _as_tuple(ds.coords["time"]) == tuple(coords["time"])
+    assert _as_tuple(ds.coords["level"]) == tuple(coords["level"])
 
     ds["temp"] = (("time",), np.arange(5.0))
     assert "temp" in ds.data_vars
-    assert tuple(ds.coords["level"]) == tuple(coords["level"])
+    assert _as_tuple(ds.coords["level"]) == tuple(coords["level"])
 
     ds["pressure"] = (("level",), np.linspace(0.0, 1.0, 3))
     torch.testing.assert_close(ds["pressure"].coords["level"], torch.as_tensor(coords["level"]))
+
+
+def test_dataset_constructs_from_raw_variables():
+    time = np.array([0.0, 1.0, 2.0])
+    level = torch.tensor([100.0, 250.0])
+    temp = torch.arange(6.0, dtype=torch.float32).reshape(3, 2)
+    wind = torch.linspace(0.0, 1.0, 3)
+    ds = Dataset(
+        {
+            "temp": (("time", "level"), temp),
+            "wind": (("time",), wind),
+        },
+        coords={"time": time, "level": level},
+    )
+    torch.testing.assert_close(ds["temp"].data, temp)
+    torch.testing.assert_close(ds["wind"].data, wind)
+    torch.testing.assert_close(ds["temp"].coords["time"], torch.as_tensor(time))
+    torch.testing.assert_close(ds["temp"].coords["level"], level)
+    assert "time" in ds.coords
+    assert "time" in ds.indexes
+    assert len(ds.indexes["time"]) == time.shape[0]
 
 
 def test_dataset_to_matches_xarray(base_dataset):
@@ -93,7 +119,10 @@ def test_dataset_to_matches_xarray(base_dataset):
 def test_assign_coords_allows_new_dimension():
     ds = Dataset({})
     ds = ds.assign_coords(ens=np.arange(3))
-    assert tuple(ds.coords["ens"]) == (0.0, 1.0, 2.0)
+    values = ds.coords["ens"]
+    if isinstance(values, torch.Tensor):
+        values = tuple(values.tolist())
+    assert tuple(values) == (0.0, 1.0, 2.0)
 
     ds["values"] = (("ens",), np.array([10.0, 20.0, 30.0]))
     torch.testing.assert_close(ds["values"].coords["ens"], torch.arange(3, dtype=torch.int64))
@@ -104,5 +133,20 @@ def test_dataset_accepts_cuda_coordinate_inputs():
     device = torch.device("cuda:0")
     coords = {"obs": torch.arange(4, dtype=torch.float64, device=device)}
     ds = Dataset({}, coords=coords)
-    assert tuple(ds.coords["obs"]) == (0.0, 1.0, 2.0, 3.0)
+    obs = ds.coords["obs"]
+    if isinstance(obs, torch.Tensor):
+        obs = tuple(obs.cpu().tolist())
+    assert tuple(obs) == (0.0, 1.0, 2.0, 3.0)
     ds["values"] = (("obs",), np.ones(4))
+
+
+def test_dataset_coordinate_returns_tuple_for_strings():
+    ds = Dataset({}, coords={"labels": ["north", "south"]})
+    coord = ds["labels"]
+    assert coord == ("north", "south")
+
+
+def test_dataset_rejects_dimension_mismatch(base_dataset):
+    ds = Dataset.from_xarray(base_dataset)
+    with pytest.raises(ValueError):
+        ds["bad"] = (("time",), np.arange(base_dataset.sizes["time"] - 1))

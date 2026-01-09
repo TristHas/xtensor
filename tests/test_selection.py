@@ -53,3 +53,17 @@ def test_getitem_matches_xarray(base_array):
     xt_ellipsis = tensor[..., 1]
     np.testing.assert_allclose(xt_ellipsis.data.numpy(), xp_ellipsis.data)
     assert xt_ellipsis.dims == xp_ellipsis.dims
+
+
+def test_isel_supports_negative_indexes(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+    result = tensor.isel(x=-1)
+    xp = base_array.isel(x=-1)
+    np.testing.assert_allclose(result.data.numpy(), xp.data)
+
+
+def test_string_coordinate_lookup_returns_raw(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+    coords = tensor["y"]
+    assert isinstance(coords, tuple)
+    assert coords == tuple(base_array.coords["y"].values.tolist())

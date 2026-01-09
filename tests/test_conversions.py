@@ -4,7 +4,7 @@ import pytest
 import torch
 import xarray as xr
 
-from xtensor import DataTensor, Dataset
+from xtensor import DataTensor, Dataset, open_datatensor, open_datasest, read_pickle
 
 
 def test_to_dataarray_roundtrip(base_array):
@@ -56,7 +56,7 @@ def test_dataarray_datetime_roundtrip():
 def test_open_dataarray(tmp_path, base_array):
     path = tmp_path / "array.nc"
     base_array.to_netcdf(path)
-    tensor = DataTensor.open_dataarray(path)
+    tensor = open_datatensor(path)
     np.testing.assert_allclose(tensor.data.numpy(), base_array.data)
     assert tensor.dims == base_array.dims
 
@@ -64,9 +64,27 @@ def test_open_dataarray(tmp_path, base_array):
 def test_open_dataset(tmp_path, base_dataset):
     path = tmp_path / "dataset.nc"
     base_dataset.to_netcdf(path)
-    dataset = Dataset.open_dataset(path)
+    dataset = open_datasest(path)
     temp = dataset["temp"]
     wind = dataset["wind"]
     np.testing.assert_allclose(temp.data.numpy(), base_dataset["temp"].data)
     np.testing.assert_allclose(wind.data.numpy(), base_dataset["wind"].data)
     assert set(dataset.dims) == set(base_dataset.dims)
+
+
+def test_read_pickle_series(tmp_path):
+    path = tmp_path / "series.pkl"
+    index = pd.date_range("2000-01-01", periods=4, freq="D", name="time")
+    series = pd.Series([10, 20, 30, 40], index=index)
+    series.to_pickle(path)
+
+    tensor = read_pickle(path)
+
+    assert tensor.dims == ("time",)
+    coord = tensor["time"]
+    assert isinstance(coord, pd.DatetimeIndex)
+    assert coord.equals(index)
+
+    limited = tensor.sel(time=slice(None, "2000-01-02"))
+    expected = series.loc[: "2000-01-02"].to_numpy()
+    np.testing.assert_allclose(limited.data.cpu().numpy(), expected)
