@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 import torch
@@ -140,10 +141,11 @@ def test_dataset_accepts_cuda_coordinate_inputs():
     ds["values"] = (("obs",), np.ones(4))
 
 
-def test_dataset_coordinate_returns_tuple_for_strings():
+def test_dataset_coordinate_returns_pandas_index_for_strings():
     ds = Dataset({}, coords={"labels": ["north", "south"]})
     coord = ds["labels"]
-    assert coord == ("north", "south")
+    assert isinstance(coord, pd.Index)
+    assert coord.equals(pd.Index(["north", "south"]))
 
 
 def test_dataset_rejects_dimension_mismatch(base_dataset):

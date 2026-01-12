@@ -3,7 +3,6 @@ from typing import Any
 from .datatensor import DataTensor
 from .dataset import Dataset
 
-
 def open_datatensor(*args: Any, **kwargs: Any) -> DataTensor:
     """Open a DataTensor from inputs accepted by xarray.open_dataarray."""
     try:
@@ -16,7 +15,6 @@ def open_datatensor(*args: Any, **kwargs: Any) -> DataTensor:
         return DataTensor.from_dataarray(data_array)
     finally:
         data_array.close()
-
 
 def open_datasest(*args: Any, **kwargs: Any) -> Dataset:
     """Open a Dataset from inputs accepted by xarray.open_dataset."""
@@ -31,12 +29,17 @@ def open_datasest(*args: Any, **kwargs: Any) -> Dataset:
     finally:
         ds.close()
 
-
-def read_pickle(*args: Any, **kwargs: Any) -> DataTensor:
+def read_pickle(*args: Any, dims=None, **kwargs: Any) -> DataTensor:
     """Load a pickled pandas object and convert it into a DataTensor."""
     import pandas as pd
-
     obj = pd.read_pickle(*args, **kwargs)
-    return DataTensor.from_pandas(obj)
+    return DataTensor.from_pandas(obj, dims=dims)
+
+def read_feather(*args: Any, dims=None, **kwargs: Any) -> DataTensor:
+    """Load a pickled pandas object and convert it into a DataTensor."""
+    import pandas as pd
+    obj = pd.read_feather(*args, **kwargs)
+    return DataTensor.from_pandas(obj, dims=dims)
+
 
 __all__ = ["DataTensor", "Dataset", "open_datatensor", "open_datasest", "read_pickle"]

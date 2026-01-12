@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import torch
 
 from xtensor import DataTensor
@@ -65,5 +66,17 @@ def test_isel_supports_negative_indexes(base_array):
 def test_string_coordinate_lookup_returns_raw(base_array):
     tensor = DataTensor.from_dataarray(base_array)
     coords = tensor["y"]
-    assert isinstance(coords, tuple)
-    assert coords == tuple(base_array.coords["y"].values.tolist())
+    assert isinstance(coords, pd.Index)
+    expected = pd.Index(base_array.coords["y"].values)
+    assert coords.equals(expected)
+
+
+def test_sel_accepts_coordinate_datatensor(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+    selected_x = tensor.sel(x=tensor["x"])
+    torch.testing.assert_close(selected_x.data, tensor.data)
+    assert selected_x.dims == tensor.dims
+
+    selected_y = tensor.sel(y=tensor["y"])
+    torch.testing.assert_close(selected_y.data, tensor.data)
+    assert selected_y.dims == tensor.dims

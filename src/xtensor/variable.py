@@ -13,6 +13,10 @@ class Variable:
         self._dims = tuple(dims)
 
     @property
+    def dtype(self) -> torch.Tensor:
+        return self._data.dtype
+        
+    @property
     def data(self) -> torch.Tensor:
         return self._data
 

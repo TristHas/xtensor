@@ -102,7 +102,7 @@ def test_elementwise_coordinate_mismatch_raises():
         _ = left + right
 
 
-def test_elementwise_missing_dimension_raises():
+def test_elementwise_missing_dimension_broadcasts():
     base = DataTensor(
         torch.arange(4.0).reshape(2, 2),
         {"x": [0, 1], "y": [0, 1]},
@@ -113,5 +113,7 @@ def test_elementwise_missing_dimension_raises():
         {"x": [0, 1]},
         ("x",),
     )
-    with pytest.raises(ValueError, match="dimension set"):
-        _ = base + extra
+    summed = base + extra
+    expected = torch.arange(4.0).reshape(2, 2) + torch.arange(2.0).reshape(2, 1)
+    torch.testing.assert_close(summed.data, expected)
+    assert summed.dims == ("x", "y")

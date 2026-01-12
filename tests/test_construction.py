@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+import xarray as xr
 
 from xtensor import DataTensor
 
@@ -38,8 +39,8 @@ def test_from_pandas_series_and_dataframe():
 
     df = pd.DataFrame([[1, 2], [3, 4]], index=pd.Index(["a", "b"], name="row"), columns=pd.Index(["x", "y"], name="col"))
     tensor_df = DataTensor.from_pandas(df)
-    assert tensor_df.dims == ("col", "row")
-    np.testing.assert_allclose(tensor_df.data.numpy(), df.to_numpy().T)
+    assert tensor_df.dims == ("row", "col")
+    np.testing.assert_allclose(tensor_df.data.numpy(), df.to_numpy())
 
 
 def test_datatensor_device_property():
@@ -58,3 +59,25 @@ def test_datatensor_to_updates_coord_tensors():
     coord = converted.coords["x"]
     assert isinstance(coord, torch.Tensor)
     assert coord.dtype == torch.float32
+
+
+def test_from_pandas_and_xarray_produce_matching_indexes():
+    index = pd.Index([0, 1, 2], name="row")
+    columns = pd.Index(["a", "b"], name="col")
+    df = pd.DataFrame([[1, 2], [3, 4], [5, 6]], index=index, columns=columns)
+    xr_array = xr.DataArray(df, dims=("row", "col"))
+
+    xt_from_pd = DataTensor.from_pandas(df)
+    xt_from_xr = DataTensor.from_dataarray(xr_array)
+
+    assert xt_from_pd.dims == xt_from_xr.dims
+    torch.testing.assert_close(xt_from_pd.data, xt_from_xr.data)
+    for dim in xt_from_pd.dims:
+        pd_coord = xt_from_pd.coords[dim]
+        xr_coord = xt_from_xr.coords[dim]
+        if isinstance(pd_coord, torch.Tensor):
+            assert isinstance(xr_coord, torch.Tensor)
+            torch.testing.assert_close(pd_coord, xr_coord)
+        else:
+            assert hasattr(pd_coord, "equals")
+            assert pd_coord.equals(xr_coord)
