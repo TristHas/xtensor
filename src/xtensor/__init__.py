@@ -16,7 +16,7 @@ def open_datatensor(*args: Any, **kwargs: Any) -> DataTensor:
     finally:
         data_array.close()
 
-def open_datasest(*args: Any, **kwargs: Any) -> Dataset:
+def open_dataset(*args: Any, **kwargs: Any) -> Dataset:
     """Open a Dataset from inputs accepted by xarray.open_dataset."""
     try:
         import xarray as xr
