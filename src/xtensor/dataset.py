@@ -234,6 +234,70 @@ class Dataset:
         }
         return self._replace(data_vars=new_vars, recompute_coords=True, extra_coords=preserved or None)
 
+    def to_datatensor(self, dim: str = "variable", name: Optional[str] = None) -> DataTensor:
+        if not self._data_vars:
+            raise ValueError("Cannot convert an empty Dataset to a DataTensor.")
+
+        dataset_dims = self._iter_dims()
+        dim_positions = {d: idx for idx, d in enumerate(dataset_dims)}
+        target_shape = tuple(self.sizes[d] for d in dataset_dims)
+        resolved_dtype: Optional[torch.dtype] = None
+        target_device: Optional[torch.device] = None
+        aligned_tensors = []
+
+        for var_name, var in self._data_vars.items():
+            data = var.data
+            ordered_dims = var.dims
+            if ordered_dims:
+                perm = sorted(range(len(ordered_dims)), key=lambda axis: dim_positions[ordered_dims[axis]])
+                if perm != list(range(len(ordered_dims))):
+                    data = data.permute(*perm)
+                ordered_dims = tuple(ordered_dims[idx] for idx in perm)
+            data_dims = list(ordered_dims)
+            aligned = data
+            for axis, dataset_dim in enumerate(dataset_dims):
+                if axis < len(data_dims) and data_dims[axis] == dataset_dim:
+                    continue
+                aligned = aligned.unsqueeze(axis)
+                data_dims.insert(axis, dataset_dim)
+            if dataset_dims:
+                for axis, target in enumerate(target_shape):
+                    current = aligned.shape[axis]
+                    if current not in (1, target):
+                        raise ValueError(
+                            f"Variable '{var_name}' dimension '{dataset_dims[axis]}' has incompatible size {current}."
+                        )
+                aligned = aligned.expand(*target_shape)
+
+            aligned_tensors.append(aligned)
+            if resolved_dtype is None:
+                resolved_dtype = aligned.dtype
+            else:
+                resolved_dtype = torch.promote_types(resolved_dtype, aligned.dtype)
+            if target_device is None:
+                target_device = aligned.device
+
+        assert resolved_dtype is not None
+        assert target_device is not None
+
+        stacked_inputs = []
+        for tensor in aligned_tensors:
+            if tensor.dtype != resolved_dtype or tensor.device != target_device:
+                stacked_inputs.append(tensor.to(device=target_device, dtype=resolved_dtype))
+            else:
+                stacked_inputs.append(tensor)
+        stacked = torch.stack(stacked_inputs, dim=0)
+
+        coords: Dict[str, CoordValue] = {}
+        coords[dim] = tuple(self._data_vars.keys())
+        for dataset_dim in dataset_dims:
+            coords[dataset_dim] = self._coords.coord_values(dataset_dim)
+        for name_key, values in self._coords.extra_items().items():
+            coords[name_key] = values
+
+        result_dims = (dim,) + dataset_dims
+        return DataTensor(stacked, coords, result_dims, attrs=self.attrs, name=name)
+
     def to(self, *args: Any, **kwargs: Any) -> "Dataset":
         if not self._data_vars:
             return self

@@ -30,6 +30,33 @@ def test_squeeze():
     squeezed = tensor.squeeze("batch")
     assert squeezed.dims == ("x", "y")
     np.testing.assert_allclose(squeezed.data.numpy(), tensor.data.squeeze(0).numpy())
+    assert "batch" in squeezed.coords
+
+
+def test_squeeze_drop_true_removes_coord():
+    tensor = DataTensor(
+        np.arange(6).reshape(1, 2, 3),
+        {"batch": [0], "x": ["a", "b"], "y": [0, 1, 2]},
+        ("batch", "x", "y"),
+    )
+    squeezed = tensor.squeeze("batch", drop=True)
+    assert squeezed.dims == ("x", "y")
+    assert "batch" not in squeezed.coords
+
+
+def test_squeeze_default_dims_respects_drop_flag():
+    tensor = DataTensor(
+        np.arange(6).reshape(1, 1, 6),
+        {"batch": [0], "channel": [1], "z": np.arange(6)},
+        ("batch", "channel", "z"),
+    )
+    squeezed = tensor.squeeze()
+    assert squeezed.dims == ("z",)
+    assert "batch" in squeezed.coords and "channel" in squeezed.coords
+
+    dropped = tensor.squeeze(drop=True)
+    assert dropped.dims == ("z",)
+    assert "batch" not in dropped.coords and "channel" not in dropped.coords
 
 
 def test_assign_coords_matches_xarray(base_array):

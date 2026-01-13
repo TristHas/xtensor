@@ -10,8 +10,9 @@ except ImportError:  # pragma: no cover
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
-from .alignment import align_binary_operands
+from .alignment import _broadcast_tensor, _merge_dim_indexes, align_binary_operands
 from .coordinates import Coordinates, CoordinatesView, IndexesView
 from .indexes import BaseIndex, CoordArray, CoordValue, build_index
 from .variable import Variable
@@ -151,6 +152,50 @@ def _expanded_indexer(key: Any, ndim: int) -> Tuple[Any, ...]:
     new_key.extend((ndim - len(new_key)) * [slice(None)])
     return tuple(new_key)
 
+
+def _supports_nan(dtype: torch.dtype) -> bool:
+    return dtype.is_floating_point or dtype.is_complex()
+
+
+def _nanmean_op(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
+    if not _supports_nan(data.dtype):
+        return torch.mean(data, dim=dim, keepdim=keepdim)
+    return torch.nanmean(data, dim=dim, keepdim=keepdim)
+
+
+def _nanvar_impl(data: torch.Tensor, dim: Optional[int], keepdim: bool, unbiased: bool) -> torch.Tensor:
+    if not _supports_nan(data.dtype):
+        return torch.var(data, dim=dim, keepdim=keepdim, unbiased=unbiased)
+    mask = ~torch.isnan(data)
+    safe = torch.where(mask, data, torch.zeros_like(data))
+    min_count = 2 if unbiased else 1
+    if dim is None:
+        valid = int(mask.sum().item())
+        if valid < min_count:
+            return data.new_full((), float("nan"))
+        count = torch.as_tensor(valid, dtype=data.dtype, device=data.device)
+        total = safe.sum()
+        mean = total / count
+        centered = torch.where(mask, data - mean, torch.zeros_like(data))
+        sumsq = (centered.conj() * centered).sum()
+        denom = count - (1 if unbiased else 0)
+        return sumsq / denom
+    count = mask.sum(dim=dim, keepdim=True).to(data.dtype)
+    valid = count >= min_count
+    safe_count = torch.where(valid, count, torch.ones_like(count))
+    total = safe.sum(dim=dim, keepdim=True)
+    mean = total / safe_count
+    centered = torch.where(mask, data - mean, torch.zeros_like(data))
+    sumsq = (centered.conj() * centered).sum(dim=dim, keepdim=True)
+    denom = safe_count - (1 if unbiased else 0)
+    denom = torch.clamp(denom, min=1)
+    var = sumsq / denom
+    nan_fill = var.new_full(var.shape, float("nan"))
+    var = torch.where(valid, var, nan_fill)
+    if not keepdim:
+        var = var.squeeze(dim)
+    return var
+
 class DataTensor:
     """Minimal xarray.DataArray inspired wrapper around torch.Tensor."""
 
@@ -174,6 +219,7 @@ class DataTensor:
         dims: Sequence[str],
         *,
         attrs: Optional[Mapping[str, Any]] = None,
+        name: Optional[str] = None,
     ):
         tensor = _to_tensor(data)
         dims = tuple(dims)
@@ -191,6 +237,7 @@ class DataTensor:
 
         self._coords = Coordinates(dim_indexes, extra_coords=extra_coords)
         self._attrs: Dict[str, Any] = dict(attrs or {})
+        self._name: Optional[str] = name
 
     @property
     def dtype(self) -> torch.Tensor:
@@ -213,7 +260,17 @@ class DataTensor:
         grad = self._variable.data.grad
         if grad is None:
             return None
-        return DataTensor(grad, self.coords, self._dims)
+        return DataTensor(grad, self.coords, self._dims, name=self._name)
+
+    def retain_grad(self) -> "DataTensor":
+        """Retain gradient information on the underlying tensor."""
+        self._variable.data.retain_grad()
+        return self
+
+    def require_grad(self, requires_grad: bool = True) -> "DataTensor":
+        """In-place requires_grad flag that mirrors torch.Tensor.requires_grad_."""
+        self._variable.data.requires_grad_(requires_grad)
+        return self
 
     @property
     def dims(self) -> Tuple[str, ...]:
@@ -239,6 +296,14 @@ class DataTensor:
     def attrs(self) -> Dict[str, Any]:
         return dict(self._attrs)
 
+    @property
+    def name(self) -> Optional[str]:
+        return self._name
+
+    @name.setter
+    def name(self, value: Optional[str]) -> None:
+        self._name = value
+
     @staticmethod
     def from_pandas(obj: Any, dims: Optional[Sequence[str]] = None) -> "DataTensor":
         if pd is None:  # pragma: no cover - defensive
@@ -248,7 +313,7 @@ class DataTensor:
             dim = (dims[0] if dims else obj.index.name) or "index"
             data = torch.as_tensor(obj.to_numpy())
             coords = {dim: _normalize_coord_values(obj.index, data.shape[0])}
-            return DataTensor(data, coords, (dim,))
+            return DataTensor(data, coords, (dim,), name=obj.name)
 
         if isinstance(obj, pd.DataFrame):
             dims = dims or (obj.index.name or "index", obj.columns.name or "columns")
@@ -259,7 +324,7 @@ class DataTensor:
                 dims[0]: _normalize_coord_values(obj.index, data.shape[0]),
                 dims[1]: _normalize_coord_values(obj.columns, data.shape[1]),
             }
-            return DataTensor(data, coords, tuple(dims))
+            return DataTensor(data, coords, tuple(dims), name=getattr(obj, "name", None))
 
         raise TypeError("from_pandas expects a pandas Series or DataFrame.")
 
@@ -280,7 +345,7 @@ class DataTensor:
             else:
                 source = coord_var.to_numpy()
             coords[dim] = _normalize_coord_values(source, size)
-        return DataTensor(array.data, coords, dims)
+        return DataTensor(array.data, coords, dims, attrs=getattr(array, "attrs", None), name=getattr(array, "name", None))
 
     def sel(self, **indexers: Any) -> "DataTensor":
         return self._select(indexers, use_coords=True)
@@ -289,15 +354,39 @@ class DataTensor:
         return self._select(indexers, use_coords=False)
 
     def mean(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
-        return self._reduce(torch.mean, dim=dim, keepdims=keepdims)
+        return self._reduce(_nanmean_op, dim=dim, keepdims=keepdims, allow_all_reduce=True)
 
     def std(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False, unbiased: bool = False) -> "DataTensor":
-        def _std(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
-            if dim is None:
-                return torch.std(data.view(-1), unbiased=unbiased)
-            return torch.std(data, dim=dim, keepdim=keepdim, unbiased=unbiased)
+        def _nanstd(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
+            variance = _nanvar_impl(data, dim, True, unbiased)
+            std = torch.sqrt(variance)
+            if dim is not None and not keepdim:
+                std = std.squeeze(dim)
+            return std
 
-        return self._reduce(_std, dim=dim, keepdims=keepdims, allow_all_reduce=True)
+        return self._reduce(_nanstd, dim=dim, keepdims=keepdims, allow_all_reduce=True)
+
+    def var(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False, unbiased: bool = False) -> "DataTensor":
+        def _nanvar(data: torch.Tensor, axis: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
+            def _apply(values: torch.Tensor, reduction_dim: Optional[int], keep: bool) -> torch.Tensor:
+                mask = torch.isfinite(values)
+                mean = torch.nanmean(values, dim=reduction_dim, keepdim=True)
+                centered = torch.where(mask, values - mean, torch.zeros_like(values))
+                sumsq = torch.nansum(centered ** 2, dim=reduction_dim, keepdim=True)
+                counts = mask.sum(dim=reduction_dim, keepdim=True).to(values.dtype)
+                if unbiased:
+                    counts = torch.clamp(counts - 1, min=1)
+                counts = torch.clamp(counts, min=1)
+                variance = sumsq / counts
+                if not keep:
+                    variance = variance.squeeze(dim=reduction_dim)
+                return variance
+
+            if axis is None:
+                return _apply(data.reshape(-1), None, keepdim)
+            return _apply(data, axis, keepdim)
+
+        return self._reduce(_nanvar, dim=dim, keepdims=keepdims, allow_all_reduce=True)
 
     def sum(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
         return self._reduce(torch.sum, dim=dim, keepdims=keepdims)
@@ -320,6 +409,15 @@ class DataTensor:
 
     def prod(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
         return self._reduce(torch.prod, dim=dim, keepdims=keepdims)
+
+    def any(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
+        return self._reduce(torch.any, dim=dim, keepdims=keepdims)
+
+    def var(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False, unbiased: bool = False) -> "DataTensor":
+        def _nanvar(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
+            return _nanvar_impl(data, dim, keepdim, unbiased)
+
+        return self._reduce(_nanvar, dim=dim, keepdims=keepdims, allow_all_reduce=True)
 
     def to(self, device=None, dtype=None, **kwargs: Any) -> "DataTensor":
         moved = self.data.to(device=device, dtype=dtype, **kwargs)
@@ -377,7 +475,7 @@ class DataTensor:
         new_coords = Coordinates(ordered_indexes, extra_coords=self._coords.extra_items())
         return self._new(variable=variable, dims=new_dims_tuple, coords=new_coords)
 
-    def squeeze(self, dims: Optional[Union[str, Sequence[str]]] = None) -> "DataTensor":
+    def squeeze(self, dims: Optional[Union[str, Sequence[str]]] = None, drop: bool = False) -> "DataTensor":
         if dims is None:
             target_dims = [dim for dim, size in zip(self._dims, self.shape) if size == 1]
         else:
@@ -401,6 +499,8 @@ class DataTensor:
         new_dims = tuple(dim for dim in self._dims if dim not in target_dims)
         variable = self._variable.with_data(data, new_dims)
         new_coords = self._coords.drop_dims(target_dims)
+        if drop and target_dims:
+            new_coords = new_coords.replace(drop_extra=target_dims)
         return self._new(variable=variable, coords=new_coords, dims=new_dims)
 
     def assign_coords(self, **coords: CoordValue) -> "DataTensor":
@@ -474,10 +574,57 @@ class DataTensor:
             else:
                 coords[name] = extra
         data = self.data.detach().cpu().numpy()
-        return xr.DataArray(data, dims=self._dims, coords=coords)
+        attrs = dict(self._attrs)
+        return xr.DataArray(data, dims=self._dims, coords=coords, name=self._name, attrs=attrs)
 
     def to_xarray(self):
         return self.to_dataarray()
+
+    @property
+    def plot(self):
+        try:
+            data_array = self.to_dataarray()
+        except Exception as error:  # pragma: no cover - defensive
+            raise RuntimeError("Plotting requires xarray to be installed.") from error
+        return data_array.plot
+
+    @property
+    def hvplot(self):
+        try:
+            import hvplot.xarray  # noqa: F401
+        except ImportError as error:  # pragma: no cover
+            raise RuntimeError("hvplot must be installed to use DataTensor.hvplot") from error
+        return self.to_dataarray().hvplot
+
+    def to_dataset(
+        self,
+        dim: Optional[str] = None,
+        *,
+        name: Optional[str] = None,
+        promote_attrs: bool = False,
+    ) -> "Dataset":
+        from .dataset import Dataset  # local import to avoid circular dependency
+
+        if dim is not None and name is not None:
+            raise TypeError("cannot supply both dim and name arguments")
+
+        attrs = self.attrs if promote_attrs else None
+
+        if dim is None:
+            var_name = name if name is not None else self.name
+            if var_name is None:
+                raise ValueError("unable to convert unnamed DataTensor to a Dataset without providing an explicit name.")
+            return Dataset({var_name: self}, attrs=attrs)
+
+        if dim not in self._dims:
+            raise ValueError(f"Dimension '{dim}' not present in DataTensor.")
+
+        coord_values = self.coords[dim]
+        labels = list(_as_list(coord_values))
+        data_vars: "OrderedDict[Any, DataTensor]" = OrderedDict()
+        for idx, label in enumerate(labels):
+            data_vars[label] = self.isel(**{dim: idx})
+        return Dataset(data_vars, attrs=attrs)
 
     def to_pandas(self):
         import pandas as pd
@@ -698,6 +845,7 @@ class DataTensor:
         coords: Optional[Coordinates] = None,
         dims: Optional[Sequence[str]] = None,
         attrs: Optional[Mapping[str, Any]] = None,
+        name: Optional[str] = None,
     ) -> "DataTensor":
         obj = self.__class__.__new__(self.__class__)
         base_variable = variable if variable is not None else self._variable
@@ -710,6 +858,7 @@ class DataTensor:
         else:
             obj._coords = self._coords.copy()
         obj._attrs = dict(attrs) if attrs is not None else dict(self._attrs)
+        obj._name = self._name if name is None else name
         return obj
 
     def _dim_index_map(self) -> Dict[str, BaseIndex]:
@@ -739,6 +888,301 @@ class DataTensor:
             except (TypeError, ValueError, RuntimeError):
                 return values
         return DataTensor(data, {name: values}, (name,))
+
+
+def concat(
+    objects: Sequence[Any],
+    dim: Optional[Union[str, Tuple[str, CoordValue], DataTensor, CoordValue]] = None,
+    *,
+    coords: str = "different",
+) -> Any:
+    """Concatenate DataTensors or Datasets along a dimension, similar to ``xarray.concat``."""
+    items = list(objects)
+    if not items:
+        raise ValueError("concat expects at least one object.")
+    if coords not in {"different", "minimal"}:
+        raise NotImplementedError("concat currently supports coords='different' or coords='minimal'.")
+
+    first = items[0]
+    if isinstance(first, DataTensor):
+        if not all(isinstance(obj, DataTensor) for obj in items):
+            raise TypeError("concat requires inputs to be all DataTensor or all Dataset instances.")
+        return _concat_data_tensors(items, dim, coords)
+
+    try:  # Lazy import to avoid circular dependency during module loading.
+        from .dataset import Dataset  # type: ignore
+    except ImportError:  # pragma: no cover - defensive
+        Dataset = None
+
+    if Dataset is not None and isinstance(first, Dataset):
+        if not all(isinstance(obj, Dataset) for obj in items):
+            raise TypeError("concat requires inputs to be all DataTensor or all Dataset instances.")
+        return _concat_datasets(items, dim, coords)
+
+    raise TypeError("concat expects DataTensor or Dataset sequences.")
+
+
+def _concat_data_tensors(
+    tensors: Sequence[DataTensor],
+    dim: Optional[Union[str, Tuple[str, CoordValue], DataTensor, CoordValue]],
+    coords: str,
+) -> DataTensor:
+    tensors = list(tensors)
+    target_dim, coord_provider = _parse_concat_dim_argument(dim)
+    has_dim = all(target_dim in tensor.dims for tensor in tensors)
+    has_any_dim = any(target_dim in tensor.dims for tensor in tensors)
+
+    if has_dim:
+        aligned = _align_concat_tensors(tensors, exclude_dim=target_dim)
+        return _concat_existing_dim(aligned, target_dim, coord_provider, coords)
+    if has_any_dim:
+        raise ValueError(f"Dimension '{target_dim}' is present in only a subset of tensors.")
+    aligned = _align_concat_tensors(tensors)
+    return _concat_new_dim(aligned, target_dim, coord_provider, coords)
+
+
+def _concat_datasets(
+    datasets: Sequence["Dataset"],
+    dim: Optional[Union[str, Tuple[str, CoordValue], DataTensor, CoordValue]],
+    coords: str,
+) -> "Dataset":
+    from .dataset import Dataset  # Local import to avoid cyclic initialization issues.
+
+    mapped = [ds.data_vars for ds in datasets]
+    if not mapped:
+        raise ValueError("concat expects at least one Dataset.")  # pragma: no cover - defensive
+    base_names = list(mapped[0].keys())
+    base_set = set(base_names)
+    for current in mapped[1:]:
+        names = set(current.keys())
+        if names != base_set:
+            raise ValueError("All Dataset inputs must define the same data variables.")
+    new_vars: "OrderedDict[str, DataTensor]" = OrderedDict()
+    for name in base_names:
+        pieces = [current[name] for current in mapped]
+        new_vars[name] = _concat_data_tensors(pieces, dim, coords)
+    shared_coords = _shared_dataset_extra_coords(datasets, coords)
+    attrs = datasets[0].attrs
+    return Dataset(new_vars, coords=shared_coords or None, attrs=attrs)
+
+
+def _parse_concat_dim_argument(
+    dim: Optional[Union[str, Tuple[str, CoordValue], DataTensor, CoordValue]],
+) -> Tuple[str, Optional[Callable[[int], CoordValue]]]:
+    if dim is None:
+        return "concat_dim", None
+
+    if isinstance(dim, str):
+        return dim, None
+
+    if isinstance(dim, DataTensor):
+        if dim.data.ndim != 1:
+            raise ValueError("The dimension specification DataTensor must be 1D.")
+        name = dim.dims[0] if dim.dims else "concat_dim"
+
+        def _provider(size: int) -> CoordValue:
+            if dim.data.shape[0] != size:
+                raise ValueError(f"Expected concat dim of length {size}, received {dim.data.shape[0]}.")
+            return _normalize_coord_values(dim.data, size)
+
+        return name, _provider
+
+    if isinstance(dim, tuple) and len(dim) == 2 and isinstance(dim[0], str):
+        name = dim[0]
+        raw_values = dim[1]
+
+        def _provider(size: int) -> CoordValue:
+            return _normalize_coord_values(raw_values, size)
+
+        return name, _provider
+
+    if pd is not None and isinstance(dim, pd.Index):
+        name = dim.name or "concat_dim"
+
+        def _provider(size: int) -> CoordValue:
+            return _normalize_coord_values(dim, size)
+
+        return name, _provider
+
+    # Treat remaining inputs as coordinate values with implicit dimension.
+    if isinstance(dim, (list, tuple, np.ndarray, torch.Tensor)) and not isinstance(dim, str):
+        raw_values = dim
+
+        def _provider(size: int) -> CoordValue:
+            return _normalize_coord_values(raw_values, size)
+
+        return "concat_dim", _provider
+
+    raise TypeError("dim must be a string, (name, values) tuple, DataTensor, or coordinate values.")
+
+
+def _concat_existing_dim(
+    tensors: Sequence[DataTensor],
+    dim: str,
+    coord_provider: Optional[Callable[[int], CoordValue]],
+    coords: str,
+) -> DataTensor:
+    base = tensors[0]
+
+    axis = base.dims.index(dim)
+    pieces = [tensor.data for tensor in tensors]
+    concatenated = torch.cat(pieces, dim=axis)
+
+    total_size = concatenated.shape[axis]
+    if coord_provider is not None:
+        coord_values = coord_provider(total_size)
+    else:
+        indexes = [tensor._coords.dim_index(dim) for tensor in tensors]
+        coord_values = _concat_index_values(indexes)
+    dim_index = build_index(coord_values, total_size, dim, device=base.device)
+
+    dim_indexes = OrderedDict(base._coords.dim_indexes())
+    dim_indexes[dim] = dim_index
+    extra_coords = _common_extra_coords(tensors, coords)
+    coordinates = Coordinates(dim_indexes, extra_coords=extra_coords or None)
+    variable = base._variable.with_data(concatenated)
+    return base._new(variable=variable, coords=coordinates)
+
+
+def _concat_new_dim(
+    tensors: Sequence[DataTensor],
+    dim: str,
+    coord_provider: Optional[Callable[[int], CoordValue]],
+    coords: str,
+) -> DataTensor:
+    base = tensors[0]
+    stacked = torch.stack([tensor.data for tensor in tensors], dim=0)
+    result_dims = (dim,) + base.dims
+
+    total_size = len(tensors)
+    if coord_provider is not None:
+        coord_values = coord_provider(total_size)
+    else:
+        coord_values = torch.arange(total_size, dtype=torch.float64, device=base.device)
+    concat_index = build_index(coord_values, total_size, dim, device=base.device)
+
+    base_indexes = base._coords.dim_indexes()
+    dim_indexes = OrderedDict([(dim, concat_index)])
+    dim_indexes.update(base_indexes)
+    extra_coords = _common_extra_coords(tensors, coords)
+    coordinates = Coordinates(dim_indexes, extra_coords=extra_coords or None)
+    variable = base._variable.with_data(stacked, result_dims)
+    return base._new(variable=variable, coords=coordinates, dims=result_dims)
+
+
+def _align_concat_tensors(
+    tensors: Sequence[DataTensor],
+    *,
+    exclude_dim: Optional[str] = None,
+) -> Sequence[DataTensor]:
+    if len(tensors) <= 1:
+        return tensors
+
+    target_dims: list[str] = list(tensors[0].dims)
+    merged_indexes: "OrderedDict[str, BaseIndex]" = OrderedDict(tensors[0]._dim_index_map())
+
+    for tensor in tensors[1:]:
+        for dim in tensor.dims:
+            if dim not in target_dims:
+                target_dims.append(dim)
+
+    merge_dims = tuple(dim for dim in target_dims if dim != exclude_dim)
+    merged_indexes = OrderedDict(
+        (dim, index) for dim, index in merged_indexes.items() if dim != exclude_dim
+    )
+    for tensor in tensors[1:]:
+        subset = OrderedDict(
+            (dim, index) for dim, index in tensor._dim_index_map().items() if dim != exclude_dim
+        )
+        merged_indexes = OrderedDict(
+            _merge_dim_indexes(merged_indexes, subset, merge_dims, "concat")
+        )
+
+    dims_tuple = tuple(target_dims)
+    aligned = []
+    for tensor in tensors:
+        tensor_indexes = tensor._dim_index_map()
+        target_indexes: "OrderedDict[str, BaseIndex]" = OrderedDict()
+        for dim in dims_tuple:
+            if dim == exclude_dim:
+                target_indexes[dim] = tensor_indexes[dim]
+            else:
+                target_indexes[dim] = merged_indexes[dim]
+        aligned.append(_broadcast_tensor(tensor, dims_tuple, target_indexes))
+    return aligned
+
+
+def _concat_index_values(indexes: Sequence[BaseIndex]) -> CoordValue:
+    first = indexes[0].coord_array()
+    if isinstance(first, torch.Tensor):
+        arrays = [index.coord_array() for index in indexes]
+        return torch.cat(arrays, dim=0)
+    if pd is not None and isinstance(first, pd.Index):
+        combined = first
+        for index in indexes[1:]:
+            combined = combined.append(index.coord_array())  # type: ignore[call-arg]
+        return combined
+    values: list[Any] = []
+    for index in indexes:
+        values.extend(index.coord_array())
+    return values
+
+
+def _common_extra_coords(tensors: Sequence[DataTensor], coords: str) -> Mapping[str, CoordArray]:
+    base_extras = tensors[0]._coords.extra_items()
+    if coords == "minimal" or not base_extras:
+        return {}
+    retained: "OrderedDict[str, CoordArray]" = OrderedDict()
+    for name, values in base_extras.items():
+        keep = True
+        for tensor in tensors[1:]:
+            extras = tensor._coords.extra_items()
+            other = extras.get(name)
+            if not _coord_values_equal(values, other):
+                keep = False
+                break
+        if keep:
+            retained[name] = values
+    return retained
+
+
+def _coord_values_equal(lhs: Optional[CoordArray], rhs: Optional[CoordArray]) -> bool:
+    if lhs is None or rhs is None:
+        return False
+    if isinstance(lhs, torch.Tensor) and isinstance(rhs, torch.Tensor):
+        if lhs.dtype.is_floating_point or rhs.dtype.is_floating_point:
+            return torch.allclose(lhs, rhs)
+        return torch.equal(lhs, rhs)
+    if pd is not None and isinstance(lhs, pd.Index) and isinstance(rhs, pd.Index):
+        return lhs.equals(rhs)
+    return tuple(lhs) == tuple(rhs)
+
+
+def _shared_dataset_extra_coords(datasets: Sequence["Dataset"], coords: str) -> Mapping[str, CoordValue]:
+    if coords == "minimal":
+        return {}
+    from .dataset import Dataset  # Local import; typing aid.
+
+    base = datasets[0]
+    base_coords = base.coords
+    dim_names = set(base.dims.keys())
+    retained: "OrderedDict[str, CoordValue]" = OrderedDict()
+    for name in base_coords:
+        if name in dim_names:
+            continue
+        base_value = base_coords[name]
+        keep = True
+        for other in datasets[1:]:
+            if name in other.dims or name not in other.coords:
+                keep = False
+                break
+            other_value = other.coords[name]
+            if not _coord_values_equal(base_value, other_value):
+                keep = False
+                break
+        if keep:
+            retained[name] = base_value
+    return retained
 
 
 def _binary_elementwise(name: str, op: Callable[[torch.Tensor, Any], torch.Tensor], reverse_op: Callable[[torch.Tensor, Any], torch.Tensor], a: Any, b: Any) -> "DataTensor":
@@ -898,6 +1342,382 @@ def _torch_abs(input: Any):
     return _unary_elementwise("abs", torch.abs, input)
 
 
+@_implements(torch.sin, torch.Tensor.sin)
+def _torch_sin(input: Any):
+    return _unary_elementwise("sin", torch.sin, input)
+
+
+@_implements(torch.cos, torch.Tensor.cos)
+def _torch_cos(input: Any):
+    return _unary_elementwise("cos", torch.cos, input)
+
+
+@_implements(torch.tan, torch.Tensor.tan)
+def _torch_tan(input: Any):
+    return _unary_elementwise("tan", torch.tan, input)
+
+
+@_implements(torch.asin, torch.Tensor.asin)
+def _torch_asin(input: Any):
+    return _unary_elementwise("asin", torch.asin, input)
+
+
+@_implements(torch.acos, torch.Tensor.acos)
+def _torch_acos(input: Any):
+    return _unary_elementwise("acos", torch.acos, input)
+
+
+@_implements(torch.atan, torch.Tensor.atan)
+def _torch_atan(input: Any):
+    return _unary_elementwise("atan", torch.atan, input)
+
+
+@_implements(torch.sinh, torch.Tensor.sinh)
+def _torch_sinh(input: Any):
+    return _unary_elementwise("sinh", torch.sinh, input)
+
+
+@_implements(torch.cosh, torch.Tensor.cosh)
+def _torch_cosh(input: Any):
+    return _unary_elementwise("cosh", torch.cosh, input)
+
+
+@_implements(torch.tanh, torch.Tensor.tanh)
+def _torch_tanh(input: Any):
+    return _unary_elementwise("tanh", torch.tanh, input)
+
+
+@_implements(torch.asinh, torch.Tensor.asinh)
+def _torch_asinh(input: Any):
+    return _unary_elementwise("asinh", torch.asinh, input)
+
+
+@_implements(torch.acosh, torch.Tensor.acosh)
+def _torch_acosh(input: Any):
+    return _unary_elementwise("acosh", torch.acosh, input)
+
+
+@_implements(torch.atanh, torch.Tensor.atanh)
+def _torch_atanh(input: Any):
+    return _unary_elementwise("atanh", torch.atanh, input)
+
+
+@_implements(torch.exp, torch.Tensor.exp)
+def _torch_exp(input: Any):
+    return _unary_elementwise("exp", torch.exp, input)
+
+
+@_implements(torch.expm1, torch.Tensor.expm1)
+def _torch_expm1(input: Any):
+    return _unary_elementwise("expm1", torch.expm1, input)
+
+
+@_implements(torch.log, torch.Tensor.log)
+def _torch_log(input: Any):
+    return _unary_elementwise("log", torch.log, input)
+
+
+@_implements(torch.log10, torch.Tensor.log10)
+def _torch_log10(input: Any):
+    return _unary_elementwise("log10", torch.log10, input)
+
+
+@_implements(torch.log1p, torch.Tensor.log1p)
+def _torch_log1p(input: Any):
+    return _unary_elementwise("log1p", torch.log1p, input)
+
+
+@_implements(torch.sqrt, torch.Tensor.sqrt)
+def _torch_sqrt(input: Any):
+    return _unary_elementwise("sqrt", torch.sqrt, input)
+
+
+@_implements(torch.rsqrt, torch.Tensor.rsqrt)
+def _torch_rsqrt(input: Any):
+    return _unary_elementwise("rsqrt", torch.rsqrt, input)
+
+
+@_implements(torch.square, torch.Tensor.square)
+def _torch_square(input: Any):
+    return _unary_elementwise("square", torch.square, input)
+
+
+@_implements(torch.reciprocal, torch.Tensor.reciprocal)
+def _torch_reciprocal(input: Any):
+    return _unary_elementwise("reciprocal", torch.reciprocal, input)
+
+
+@_implements(torch.floor, torch.Tensor.floor)
+def _torch_floor(input: Any):
+    return _unary_elementwise("floor", torch.floor, input)
+
+
+@_implements(torch.ceil, torch.Tensor.ceil)
+def _torch_ceil(input: Any):
+    return _unary_elementwise("ceil", torch.ceil, input)
+
+
+@_implements(torch.trunc, torch.Tensor.trunc)
+def _torch_trunc(input: Any):
+    return _unary_elementwise("trunc", torch.trunc, input)
+
+
+@_implements(torch.round, torch.Tensor.round)
+def _torch_round(input: Any):
+    return _unary_elementwise("round", torch.round, input)
+
+
+@_implements(torch.frac, torch.Tensor.frac)
+def _torch_frac(input: Any):
+    return _unary_elementwise("frac", torch.frac, input)
+
+
+@_implements(torch.sigmoid, torch.Tensor.sigmoid)
+def _torch_sigmoid(input: Any):
+    return _unary_elementwise("sigmoid", torch.sigmoid, input)
+
+
+@_implements(torch.relu, torch.Tensor.relu)
+def _torch_relu(input: Any):
+    return _unary_elementwise("relu", torch.relu, input)
+
+
+@_implements(torch.sign, torch.Tensor.sign)
+def _torch_sign(input: Any):
+    return _unary_elementwise("sign", torch.sign, input)
+
+
+@_implements(torch.signbit, torch.Tensor.signbit)
+def _torch_signbit(input: Any):
+    return _unary_elementwise("signbit", torch.signbit, input)
+
+
+@_implements(torch.logical_not, torch.Tensor.logical_not)
+def _torch_logical_not(input: Any):
+    return _unary_elementwise("logical_not", torch.logical_not, input)
+
+
+@_implements(torch.bitwise_not, torch.Tensor.bitwise_not)
+def _torch_bitwise_not(input: Any):
+    return _unary_elementwise("bitwise_not", torch.bitwise_not, input)
+
+
+@_implements(torch.isfinite, torch.Tensor.isfinite)
+def _torch_isfinite(input: Any):
+    return _unary_elementwise("isfinite", torch.isfinite, input)
+
+
+@_implements(torch.isinf, torch.Tensor.isinf)
+def _torch_isinf(input: Any):
+    return _unary_elementwise("isinf", torch.isinf, input)
+
+
+@_implements(torch.isreal, torch.Tensor.isreal)
+def _torch_isreal(input: Any):
+    return _unary_elementwise("isreal", torch.isreal, input)
+
+
+@_implements(F.softplus)
+def _torch_softplus(input: Any, beta: float = 1.0, threshold: float = 20.0):
+    if not isinstance(input, DataTensor):
+        return NotImplemented
+    result = _disable_torch_function_call(F.softplus, input.data, beta=beta, threshold=threshold)
+    variable = input._variable.with_data(result)
+    return input._new(variable=variable)
+
+
+@_implements(F.softsign)
+def _torch_softsign(input: Any):
+    if not isinstance(input, DataTensor):
+        return NotImplemented
+    result = _disable_torch_function_call(F.softsign, input.data)
+    variable = input._variable.with_data(result)
+    return input._new(variable=variable)
+
+
+@_implements(torch.atan2, torch.Tensor.atan2)
+def _torch_atan2(input: Any, other: Any, *, out: Optional[Any] = None):
+    _ensure_out_argument_supported(out)
+
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.atan2, lhs, rhs)
+
+    def reverse(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.atan2, rhs, lhs)
+
+    return _binary_elementwise("atan2", op, reverse, input, other)
+
+
+@_implements(torch.isnan, torch.Tensor.isnan)
+def _torch_isnan(input: Any):
+    return _unary_elementwise("isnan", torch.isnan, input)
+
+
+@_implements(torch.nan_to_num, torch.Tensor.nan_to_num)
+def _torch_nan_to_num(input: Any, nan: float = 0.0, posinf: Optional[float] = None, neginf: Optional[float] = None, *, out: Optional[Any] = None):
+    if not isinstance(input, DataTensor):
+        return NotImplemented
+    _ensure_out_argument_supported(out)
+
+    def op(data: torch.Tensor) -> torch.Tensor:
+        return _disable_torch_function_call(torch.nan_to_num, data, nan=nan, posinf=posinf, neginf=neginf)
+
+    result = op(input.data)
+    variable = input._variable.with_data(result)
+    return input._new(variable=variable)
+
+
+@_implements(torch.logical_and, torch.Tensor.logical_and)
+def _torch_logical_and(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.logical_and, lhs, rhs)
+
+    return _binary_elementwise("logical_and", op, op, input, other)
+
+
+@_implements(torch.logical_or, torch.Tensor.logical_or)
+def _torch_logical_or(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.logical_or, lhs, rhs)
+
+    return _binary_elementwise("logical_or", op, op, input, other)
+
+
+@_implements(torch.logical_xor, torch.Tensor.logical_xor)
+def _torch_logical_xor(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.logical_xor, lhs, rhs)
+
+    return _binary_elementwise("logical_xor", op, op, input, other)
+
+
+@_implements(torch.bitwise_and, torch.Tensor.bitwise_and)
+def _torch_bitwise_and(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.bitwise_and, lhs, rhs)
+
+    return _binary_elementwise("bitwise_and", op, op, input, other)
+
+
+@_implements(torch.bitwise_or, torch.Tensor.bitwise_or)
+def _torch_bitwise_or(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.bitwise_or, lhs, rhs)
+
+    return _binary_elementwise("bitwise_or", op, op, input, other)
+
+
+@_implements(torch.bitwise_xor, torch.Tensor.bitwise_xor)
+def _torch_bitwise_xor(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.bitwise_xor, lhs, rhs)
+
+    return _binary_elementwise("bitwise_xor", op, op, input, other)
+
+
+@_implements(torch.eq, torch.Tensor.eq)
+def _torch_eq(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.eq, lhs, rhs)
+
+    def reverse(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.eq, rhs, lhs)
+
+    return _binary_elementwise("eq", op, reverse, input, other)
+
+
+@_implements(torch.ne, torch.Tensor.ne)
+def _torch_ne(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.ne, lhs, rhs)
+
+    def reverse(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.ne, rhs, lhs)
+
+    return _binary_elementwise("ne", op, reverse, input, other)
+
+
+@_implements(torch.lt, torch.Tensor.lt)
+def _torch_lt(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.lt, lhs, rhs)
+
+    def reverse(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.lt, rhs, lhs)
+
+    return _binary_elementwise("lt", op, reverse, input, other)
+
+
+@_implements(torch.le, torch.Tensor.le)
+def _torch_le(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.le, lhs, rhs)
+
+    def reverse(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.le, rhs, lhs)
+
+    return _binary_elementwise("le", op, reverse, input, other)
+
+
+@_implements(torch.gt, torch.Tensor.gt)
+def _torch_gt(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.gt, lhs, rhs)
+
+    def reverse(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.gt, rhs, lhs)
+
+    return _binary_elementwise("gt", op, reverse, input, other)
+
+
+@_implements(torch.ge, torch.Tensor.ge)
+def _torch_ge(input: Any, other: Any):
+    def op(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.ge, lhs, rhs)
+
+    def reverse(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+        return _disable_torch_function_call(torch.ge, rhs, lhs)
+
+    return _binary_elementwise("ge", op, reverse, input, other)
+
+
+@_implements(torch.clamp, torch.Tensor.clamp)
+def _torch_clamp(input: Any, min: Optional[Any] = None, max: Optional[Any] = None, *, out: Optional[Any] = None):
+    _ensure_out_argument_supported(out)
+    if not isinstance(input, DataTensor):
+        return NotImplemented
+    result = _disable_torch_function_call(torch.clamp, input.data, min=min, max=max)
+    variable = input._variable.with_data(result)
+    return input._new(variable=variable)
+
+
+if hasattr(torch, "clip"):
+    tensor_clip = getattr(torch.Tensor, "clip", None)
+    if tensor_clip is not None:
+        _implements(torch.clip, tensor_clip)(_torch_clamp)
+    else:
+        _implements(torch.clip)(_torch_clamp)
+
+
+@_implements(torch.where, torch.Tensor.where)
+def _torch_where(condition: Any, input: Any, other: Any):
+    if not isinstance(condition, DataTensor):
+        return NotImplemented
+
+    def _prepare_operand(value: Any, reference: DataTensor) -> Any:
+        if isinstance(value, DataTensor):
+            if value.dims != reference.dims:
+                raise ValueError("torch.where requires matching dimensions when using DataTensor operands.")
+            return value.data
+        return value
+
+    lhs = _prepare_operand(input, condition)
+    rhs = _prepare_operand(other, condition)
+    result = _disable_torch_function_call(torch.where, condition.data, lhs, rhs)
+    variable = condition._variable.with_data(result)
+    return condition._new(variable=variable)
+
+
 @_implements(torch.sum, torch.Tensor.sum)
 def _torch_sum(input: Any, dim: Optional[Any] = None, keepdim: bool = False, dtype: Optional[Any] = None, out: Optional[Any] = None):
     if not isinstance(input, DataTensor):
@@ -935,6 +1755,24 @@ def _torch_std(input: Any, dim: Optional[Any] = None, unbiased: bool = True, kee
     _ensure_out_argument_supported(out)
     dims = _normalize_torch_dims(dim, input.dims)
     return input.std(dim=dims, keepdims=keepdim, unbiased=unbiased)
+
+
+@_implements(torch.var, torch.Tensor.var)
+def _torch_var(input: Any, dim: Optional[Any] = None, unbiased: bool = True, keepdim: bool = False, out: Optional[Any] = None):
+    if not isinstance(input, DataTensor):
+        return NotImplemented
+    _ensure_out_argument_supported(out)
+    dims = _normalize_torch_dims(dim, input.dims)
+    return input.var(dim=dims, keepdims=keepdim, unbiased=unbiased)
+
+
+@_implements(torch.any, torch.Tensor.any)
+def _torch_any(input: Any, dim: Optional[Any] = None, keepdim: bool = False, out: Optional[Any] = None):
+    if not isinstance(input, DataTensor):
+        return NotImplemented
+    _ensure_out_argument_supported(out)
+    dims = _normalize_torch_dims(dim, input.dims)
+    return input.any(dim=dims, keepdims=keepdim)
 
 
 @_implements(torch.amin, torch.Tensor.amin)

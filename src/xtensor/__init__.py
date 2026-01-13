@@ -1,6 +1,6 @@
 from typing import Any
 
-from .datatensor import DataTensor
+from .datatensor import DataTensor, concat
 from .dataset import Dataset
 
 def open_datatensor(*args: Any, **kwargs: Any) -> DataTensor:
@@ -42,4 +42,4 @@ def read_feather(*args: Any, dims=None, **kwargs: Any) -> DataTensor:
     return DataTensor.from_pandas(obj, dims=dims)
 
 
-__all__ = ["DataTensor", "Dataset", "open_datatensor", "open_datasest", "read_pickle"]
+__all__ = ["DataTensor", "Dataset", "concat", "open_datatensor", "open_dataset", "read_pickle"]
