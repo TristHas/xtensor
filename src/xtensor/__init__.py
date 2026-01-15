@@ -41,5 +41,7 @@ def read_feather(*args: Any, dims=None, **kwargs: Any) -> DataTensor:
     obj = pd.read_feather(*args, **kwargs)
     return DataTensor.from_pandas(obj, dims=dims)
 
+from_pandas = DataTensor.from_pandas
+from_dataarray = DataTensor.from_dataarray
 
 __all__ = ["DataTensor", "Dataset", "concat", "open_datatensor", "open_dataset", "read_pickle"]

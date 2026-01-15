@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -444,6 +444,21 @@ class Dataset:
             coords_summary = ", ".join(self._coords.dim_names())
             return f"Dataset(data_vars=[{vars_summary}], coords=[{coords_summary}])"
 
+    # Elementwise math -------------------------------------------------
+    def __pow__(self, other: Any) -> "Dataset":
+        if isinstance(other, Dataset):
+            return self._dataset_binary_op(other, lambda lhs, rhs: lhs**rhs, "pow")
+        new_vars = OrderedDict()
+        for name, var in self._data_vars.items():
+            new_vars[name] = var**other
+        return self._replace(data_vars=new_vars, recompute_coords=True)
+
+    def __rpow__(self, other: Any) -> "Dataset":
+        new_vars = OrderedDict()
+        for name, var in self._data_vars.items():
+            new_vars[name] = var.__rpow__(other)
+        return self._replace(data_vars=new_vars, recompute_coords=True)
+
     def _repr_html_(self):
         try:
             html = self.to_xarray()._repr_html_()
@@ -488,6 +503,22 @@ class Dataset:
             for dim in var.dims:
                 dims.setdefault(dim, None)
         return tuple(dims.keys())
+
+    def _dataset_binary_op(
+        self,
+        other: "Dataset",
+        func: Callable[[DataTensor, DataTensor], DataTensor],
+        op_name: str,
+    ) -> "Dataset":
+        left = set(self._data_vars)
+        right = set(other._data_vars)
+        if left != right:
+            missing = sorted(left ^ right)
+            raise ValueError(f"Dataset {op_name} requires identical data variables. Differing variables: {missing}")
+        new_vars: "OrderedDict[str, DataTensor]" = OrderedDict()
+        for name in self._data_vars:
+            new_vars[name] = func(self._data_vars[name], other._data_vars[name])
+        return self._replace(data_vars=new_vars, recompute_coords=True)
 
     def _compute_dim_order(self, data_vars: Mapping[str, DataTensor]) -> Tuple[str, ...]:
         present = self._collect_dims(data_vars)

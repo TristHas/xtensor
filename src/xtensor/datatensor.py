@@ -722,6 +722,12 @@ class DataTensor:
     def __rtruediv__(self, other: Any) -> "DataTensor":
         return self._binary_op(other, lambda lhs, rhs: torch.true_divide(rhs, lhs), "rtruediv")
 
+    def __pow__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.pow, "pow")
+
+    def __rpow__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, lambda lhs, rhs: torch.pow(rhs, lhs), "rpow")
+
     # Helpers ----------------------------------------------------------
     def _reduce(
         self,
