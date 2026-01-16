@@ -594,7 +594,11 @@ class DataTensor:
             import hvplot.xarray  # noqa: F401
         except ImportError as error:  # pragma: no cover
             raise RuntimeError("hvplot must be installed to use DataTensor.hvplot") from error
-        return self.to_dataarray().hvplot
+        if self.name is None:
+            name = "DataTensor"
+        else:
+            name = self.name
+        return self.to_dataarray(name=name).hvplot
 
     def to_dataset(
         self,
