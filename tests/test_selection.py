@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import torch
+import xarray as xr
 
 from xtensor import DataTensor
 
@@ -80,3 +81,23 @@ def test_sel_accepts_coordinate_datatensor(base_array):
     selected_y = tensor.sel(y=tensor["y"])
     torch.testing.assert_close(selected_y.data, tensor.data)
     assert selected_y.dims == tensor.dims
+
+
+def test_isel_supports_boolean_numpy_mask(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+    mask = np.array([True, False, True, False])
+    result = tensor.isel(x=mask)
+    xp = base_array.isel(x=mask)
+    np.testing.assert_allclose(result.data.numpy(), xp.data)
+    torch.testing.assert_close(result.coords["x"], torch.as_tensor(xp.coords["x"].values))
+
+
+def test_isel_supports_boolean_datatensor_mask(base_array):
+    tensor = DataTensor.from_dataarray(base_array)
+    mask_values = torch.tensor([True, False, True])
+    mask_tensor = DataTensor(mask_values, {"y": base_array.coords["y"].values}, ("y",))
+    result = tensor.isel(y=mask_tensor)
+    xp_mask = xr.DataArray(mask_values.numpy(), dims=("y",))
+    xp = base_array.isel(y=xp_mask)
+    np.testing.assert_allclose(result.data.numpy(), xp.data)
+    assert tuple(result.coords["y"]) == tuple(xp.coords["y"].values)

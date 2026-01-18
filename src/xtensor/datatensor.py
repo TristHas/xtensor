@@ -837,6 +837,15 @@ class DataTensor:
             subset_index = axis_index.take(idx)
             return idx, subset_index, False
 
+        if not use_coords:
+            bool_mask = self._maybe_boolean_indexer(selector, len(axis_index))
+        else:
+            bool_mask = None
+        if bool_mask is not None:
+            tensor_index = torch.nonzero(bool_mask, as_tuple=False).reshape(-1).to(device=self.device)
+            subset_index = axis_index.take(tensor_index)
+            return tensor_index, subset_index, False
+
         values = _as_list(selector)
 
         if use_coords:
@@ -850,6 +859,35 @@ class DataTensor:
 
         subset_index = axis_index.take(tensor_index)
         return tensor_index, subset_index, False
+
+    def _maybe_boolean_indexer(self, selector: Any, size: int) -> Optional[torch.Tensor]:
+        mask: Optional[torch.Tensor] = None
+        if isinstance(selector, DataTensor):
+            if selector.data.dtype != torch.bool:
+                return None
+            mask = selector.data
+        elif isinstance(selector, torch.Tensor):
+            if selector.dtype != torch.bool:
+                return None
+            mask = selector
+        elif isinstance(selector, np.ndarray):
+            if selector.dtype.kind != "b":
+                return None
+            mask = torch.as_tensor(selector, dtype=torch.bool)
+        elif isinstance(selector, (list, tuple)):
+            if not selector:
+                mask = torch.zeros(0, dtype=torch.bool)
+            else:
+                if not all(isinstance(value, (bool, np.bool_)) for value in selector):
+                    return None
+                mask = torch.as_tensor(selector, dtype=torch.bool)
+        else:
+            return None
+
+        mask = mask.reshape(-1)
+        if mask.numel() != size:
+            raise ValueError(f"Boolean indexer length mismatch. Expected {size}, received {mask.numel()}.")
+        return mask.to(device=self.device)
 
     def item(self) -> Any:
         if self.data.numel() != 1:
