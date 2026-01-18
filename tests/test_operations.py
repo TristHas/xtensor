@@ -237,6 +237,14 @@ def test_logical_unary_dispatch():
     torch.testing.assert_close(inverted.data, torch.logical_not(tensor.data))
 
 
+def test_invert_operator_negates_boolean_tensor():
+    values = torch.tensor([[True, False, True], [False, True, False]])
+    tensor = _simple_tensor(values.reshape(-1), dtype=torch.bool)
+    inverted = ~tensor
+    torch.testing.assert_close(inverted.data, torch.logical_not(tensor.data))
+    assert inverted.dims == tensor.dims
+
+
 def test_bitwise_not_dispatch():
     values = torch.arange(6, dtype=torch.int64)
     tensor = _simple_tensor(values, dtype=torch.int64)

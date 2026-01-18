@@ -732,6 +732,14 @@ class DataTensor:
     def __rpow__(self, other: Any) -> "DataTensor":
         return self._binary_op(other, lambda lhs, rhs: torch.pow(rhs, lhs), "rpow")
 
+    def __invert__(self) -> "DataTensor":
+        if self.data.dtype == torch.bool:
+            result = torch.logical_not(self.data)
+        else:
+            result = torch.bitwise_not(self.data)
+        variable = self._variable.with_data(result, self._dims)
+        return self._new(variable=variable)
+
     # Helpers ----------------------------------------------------------
     def _reduce(
         self,
