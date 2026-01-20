@@ -413,6 +413,9 @@ class DataTensor:
     def any(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
         return self._reduce(torch.any, dim=dim, keepdims=keepdims)
 
+    def all(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
+        return self._reduce(torch.all, dim=dim, keepdims=keepdims)
+
     def var(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False, unbiased: bool = False) -> "DataTensor":
         def _nanvar(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
             return _nanvar_impl(data, dim, keepdim, unbiased)
@@ -1829,6 +1832,15 @@ def _torch_any(input: Any, dim: Optional[Any] = None, keepdim: bool = False, out
     _ensure_out_argument_supported(out)
     dims = _normalize_torch_dims(dim, input.dims)
     return input.any(dim=dims, keepdims=keepdim)
+
+
+@_implements(torch.all, torch.Tensor.all)
+def _torch_all(input: Any, dim: Optional[Any] = None, keepdim: bool = False, out: Optional[Any] = None):
+    if not isinstance(input, DataTensor):
+        return NotImplemented
+    _ensure_out_argument_supported(out)
+    dims = _normalize_torch_dims(dim, input.dims)
+    return input.all(dim=dims, keepdims=keepdim)
 
 
 @_implements(torch.amin, torch.Tensor.amin)
