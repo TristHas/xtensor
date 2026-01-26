@@ -109,3 +109,14 @@ def test_any_reduction_matches_torch():
 
     kept = tensor.any(dim="y", keepdims=True)
     torch.testing.assert_close(kept.data, data.any(dim=1, keepdim=True))
+
+
+def test_all_reduction_matches_torch():
+    data = torch.tensor([[True, True, True], [True, False, True]], dtype=torch.bool)
+    tensor = DataTensor(data, {"x": [0, 1], "y": [0, 1, 2]}, ("x", "y"))
+
+    reduced = tensor.all(dim="y")
+    torch.testing.assert_close(reduced.data, data.all(dim=1))
+
+    kept = tensor.all(dim="y", keepdims=True)
+    torch.testing.assert_close(kept.data, data.all(dim=1, keepdim=True))

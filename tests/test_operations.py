@@ -87,6 +87,22 @@ def test_torch_elementwise_dispatch(base_array):
     torch.testing.assert_close(minimum.data, tensor.data)
 
 
+def test_modulo_operator_behaves_like_torch():
+    values = torch.tensor([[-3.5, -1.0, 0.5], [1.0, 3.0, 5.5]])
+    tensor = _simple_tensor(values.reshape(-1))
+
+    mod_scalar = tensor % 2.5
+    torch.testing.assert_close(mod_scalar.data, torch.remainder(tensor.data, 2.5))
+    assert mod_scalar.dims == tensor.dims
+
+    other = _simple_tensor(torch.ones_like(values).reshape(-1) * 1.5)
+    mod_tensor = tensor % other
+    torch.testing.assert_close(mod_tensor.data, torch.remainder(tensor.data, other.data))
+
+    reversed_mod = 2.5 % tensor
+    torch.testing.assert_close(reversed_mod.data, torch.remainder(torch.tensor(2.5), tensor.data))
+
+
 def test_elementwise_aligns_dimension_order(base_array):
     tensor = DataTensor.from_dataarray(base_array)
     other = DataTensor.from_dataarray(base_array.transpose("y", "x"))
@@ -269,6 +285,47 @@ def test_bitwise_binary_dispatch():
     torch.testing.assert_close(torch.bitwise_and(left, right).data, torch.bitwise_and(left.data, right.data))
     torch.testing.assert_close(torch.bitwise_or(left, right).data, torch.bitwise_or(left.data, right.data))
     torch.testing.assert_close(torch.bitwise_xor(left, right).data, torch.bitwise_xor(left.data, right.data))
+
+
+def test_dunder_comparisons_support_scalars():
+    tensor = _simple_tensor(torch.arange(6, dtype=torch.float32))
+    mask = tensor == 3.0
+    torch.testing.assert_close(mask.data, tensor.data == 3.0)
+    assert mask.data.dtype == torch.bool
+    assert mask.dims == tensor.dims
+
+    less = tensor < 4.0
+    torch.testing.assert_close(less.data, tensor.data < 4.0)
+
+    other = _simple_tensor(torch.arange(6, dtype=torch.float32) + 1.0)
+    greater_equal = tensor >= other
+    torch.testing.assert_close(greater_equal.data, tensor.data >= other.data)
+    assert greater_equal.dims == tensor.dims
+
+    reversed_mask = 2.0 == tensor
+    torch.testing.assert_close(reversed_mask.data, tensor.data == 2.0)
+
+
+def test_bitwise_dunder_ops_with_scalars_and_tensors():
+    bool_a = _simple_tensor(
+        torch.tensor([True, False, True, False, True, False]), dtype=torch.bool
+    )
+    bool_b = _simple_tensor(
+        torch.tensor([False, True, True, False, False, True]), dtype=torch.bool
+    )
+
+    combined = bool_a & bool_b
+    torch.testing.assert_close(combined.data, torch.bitwise_and(bool_a.data, bool_b.data))
+
+    combined_or = bool_a | torch.tensor(True)
+    torch.testing.assert_close(combined_or.data, torch.bitwise_or(bool_a.data, torch.tensor(True)))
+
+    int_tensor = _simple_tensor(torch.arange(6, dtype=torch.int32), dtype=torch.int32)
+    reversed_and = 1 & int_tensor
+    torch.testing.assert_close(reversed_and.data, torch.bitwise_and(torch.tensor(1, dtype=torch.int32), int_tensor.data))
+
+    reversed_or = 1 | int_tensor
+    torch.testing.assert_close(reversed_or.data, torch.bitwise_or(torch.tensor(1, dtype=torch.int32), int_tensor.data))
 
 
 def test_comparison_dispatch():
