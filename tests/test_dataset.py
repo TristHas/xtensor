@@ -152,3 +152,23 @@ def test_dataset_rejects_dimension_mismatch(base_dataset):
     ds = Dataset.from_xarray(base_dataset)
     with pytest.raises(ValueError):
         ds["bad"] = (("time",), np.arange(base_dataset.sizes["time"] - 1))
+
+
+def test_dataset_setitem_reuses_existing_coordinates():
+    coords = {"time": np.arange(4), "level": np.linspace(100.0, 400.0, 4)}
+    values = np.ones((4, 4))
+    ds = Dataset({"temp": (("time", "level"), values)}, coords=coords)
+    original_coords = ds._coords
+    ds["wind"] = (("time", "level"), values + 1.0)
+    assert ds._coords is original_coords
+    torch.testing.assert_close(ds["wind"].coords["time"], torch.as_tensor(coords["time"]))
+
+
+def test_dataset_setitem_recomputes_coords_for_new_dimension():
+    coords = {"time": np.arange(3)}
+    ds = Dataset({"temp": (("time",), np.arange(3.0))}, coords=coords)
+    original_coords = ds._coords
+    ds["pressure"] = (("level",), np.linspace(0.0, 1.0, 2), {"level": np.array([1000.0, 500.0])})
+    assert ds._coords is not original_coords
+    coord = ds["pressure"].coords["level"]
+    torch.testing.assert_close(coord, torch.as_tensor([1000.0, 500.0], dtype=coord.dtype))
