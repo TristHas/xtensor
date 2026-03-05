@@ -80,7 +80,9 @@ class Dataset:
         self._dim_order = self._compute_dim_order(self._data_vars)
         self._attrs = dict(attrs or {})
 
-    def __getitem__(self, key: str):
+    def __getitem__(self, key: Union[str, Sequence[str]]):
+        if isinstance(key, (list, tuple)):
+            return self._subset_with_data_vars(list(key))
         if self._coords.has_coord(key):
             return self._coord_as_datatensor(key)
         if key in self._data_vars:
@@ -394,6 +396,19 @@ class Dataset:
         obj._dim_order = self._compute_dim_order(obj._data_vars)
         obj._attrs = dict(attrs if attrs is not None else self._attrs)
         return obj
+
+    def _subset_with_data_vars(self, names: Sequence[str]) -> "Dataset":
+        if any(not isinstance(name, str) for name in names):
+            raise TypeError("Dataset selection keys must be strings.")
+        if not names:
+            return self._replace(data_vars=OrderedDict())
+        missing = [name for name in names if name not in self._data_vars]
+        if missing:
+            raise KeyError(missing[0] if len(missing) == 1 else missing)
+        selected = OrderedDict()
+        for name in names:
+            selected[name] = self._data_vars[name]
+        return self._replace(data_vars=selected)
 
     def _coords_from_data_vars(
         self,
