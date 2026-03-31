@@ -353,6 +353,31 @@ class DataTensor:
     def isel(self, **indexers: Any) -> "DataTensor":
         return self._select(indexers, use_coords=False)
 
+    def clip(self, min: Optional[Any] = None, max: Optional[Any] = None) -> "DataTensor":
+        if min is None and max is None:
+            raise ValueError("clip requires at least one of 'min' or 'max'.")
+
+        def _apply_bound(base: "DataTensor", bound: Any, op: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], name: str) -> "DataTensor":
+            if bound is None:
+                return base
+            if isinstance(bound, DataTensor):
+                operand = bound
+                if operand.dtype != base.dtype:
+                    operand = operand.astype(base.dtype)
+
+                def _operation(lhs: torch.Tensor, rhs: Any) -> torch.Tensor:
+                    return _disable_torch_function_call(op, lhs, rhs)
+
+                return base._binary_op(operand, _operation, name)
+            tensor_bound = _to_tensor(bound).to(device=base.device, dtype=base.dtype)
+            result = _disable_torch_function_call(op, base.data, tensor_bound)
+            variable = base._variable.with_data(result, base.dims)
+            return base._new(variable=variable)
+
+        clipped = _apply_bound(self, min, torch.maximum, "clip-min")
+        clipped = _apply_bound(clipped, max, torch.minimum, "clip-max")
+        return clipped
+
     def mean(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
         return self._reduce(_nanmean_op, dim=dim, keepdims=keepdims, allow_all_reduce=True)
 

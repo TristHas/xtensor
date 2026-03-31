@@ -297,6 +297,30 @@ def test_clamp_and_clip_dispatch():
     torch.testing.assert_close(clipped.data, torch.clip(tensor.data, min=-1.0, max=1.0))
 
 
+def test_clip_method_matches_torch():
+    tensor = _simple_tensor(torch.linspace(-2.0, 2.0, steps=6))
+    clipped = tensor.clip(min=-0.5, max=0.5)
+    torch.testing.assert_close(clipped.data, torch.clamp(tensor.data, min=-0.5, max=0.5))
+    assert clipped.dims == tensor.dims
+
+
+def test_clip_accepts_datatensor_bounds():
+    data = torch.tensor([[-2.0, -1.0, 0.5], [1.5, 2.5, 3.5]])
+    tensor = DataTensor(data, {"x": [0, 1], "y": [0, 1, 2]}, ("x", "y"))
+    min_bound = DataTensor(torch.tensor([0.0, 1.0]), {"x": [0, 1]}, ("x",))
+    max_bound = DataTensor(torch.tensor([2.0, 3.0, 4.0]), {"y": [0, 1, 2]}, ("y",))
+    clipped = tensor.clip(min=min_bound, max=max_bound)
+    expected = torch.clamp(data, min=min_bound.data.reshape(2, 1), max=max_bound.data)
+    torch.testing.assert_close(clipped.data, expected)
+    assert clipped.dims == tensor.dims
+
+
+def test_clip_requires_bound():
+    tensor = _simple_tensor(torch.arange(6.0))
+    with pytest.raises(ValueError, match="clip requires"):
+        tensor.clip()
+
+
 def test_where_dispatch():
     condition = _simple_tensor(torch.tensor([[True, False, True], [False, True, False]]).reshape(-1), dtype=torch.bool)
     x = _simple_tensor(torch.arange(6, dtype=torch.float32))
