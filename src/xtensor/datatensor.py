@@ -626,7 +626,7 @@ class DataTensor:
             name = "DataTensor"
         else:
             name = self.name
-        return self.to_dataarray(name=name).hvplot
+        return self.to_dataarray().hvplot
 
     def to_dataset(
         self,
@@ -760,6 +760,12 @@ class DataTensor:
     def __rpow__(self, other: Any) -> "DataTensor":
         return self._binary_op(other, lambda lhs, rhs: torch.pow(rhs, lhs), "rpow")
 
+    def __mod__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.remainder, "remainder")
+
+    def __rmod__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, lambda lhs, rhs: torch.remainder(rhs, lhs), "remainder")
+
     def __invert__(self) -> "DataTensor":
         if self.data.dtype == torch.bool:
             result = torch.logical_not(self.data)
@@ -767,6 +773,42 @@ class DataTensor:
             result = torch.bitwise_not(self.data)
         variable = self._variable.with_data(result, self._dims)
         return self._new(variable=variable)
+
+    def __and__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.bitwise_and, "bitwise_and")
+
+    def __rand__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, lambda lhs, rhs: torch.bitwise_and(rhs, lhs), "bitwise_and")
+
+    def __or__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.bitwise_or, "bitwise_or")
+
+    def __ror__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, lambda lhs, rhs: torch.bitwise_or(rhs, lhs), "bitwise_or")
+
+    def __xor__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.bitwise_xor, "bitwise_xor")
+
+    def __rxor__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, lambda lhs, rhs: torch.bitwise_xor(rhs, lhs), "bitwise_xor")
+
+    def __eq__(self, other: Any) -> "DataTensor":  # type: ignore[override]
+        return self._binary_op(other, torch.eq, "eq")
+
+    def __ne__(self, other: Any) -> "DataTensor":  # type: ignore[override]
+        return self._binary_op(other, torch.ne, "ne")
+
+    def __lt__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.lt, "lt")
+
+    def __le__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.le, "le")
+
+    def __gt__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.gt, "gt")
+
+    def __ge__(self, other: Any) -> "DataTensor":
+        return self._binary_op(other, torch.ge, "ge")
 
     # Helpers ----------------------------------------------------------
     def _reduce(
