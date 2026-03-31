@@ -65,6 +65,19 @@ def test_dataset_coordinate_precedence(base_dataset):
     torch.testing.assert_close(ds.data_vars["new_time"].data, coord_values + 1.0)
 
 
+def test_dataset_supports_list_indexing(base_dataset):
+    ds = Dataset.from_xarray(base_dataset)
+    xt_selected = ds[["temp", "wind"]]
+    xr_selected = base_dataset[["temp", "wind"]]
+    _assert_identical(xt_selected, xr_selected)
+
+
+def test_dataset_list_indexing_raises_for_missing_variable(base_dataset):
+    ds = Dataset.from_xarray(base_dataset)
+    with pytest.raises(KeyError):
+        _ = ds[["temp", "missing"]]
+
+
 def test_dataset_initializes_with_coordinates_only():
     coords = {
         "time": np.linspace(0.0, 4.0, 5),
