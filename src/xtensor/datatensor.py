@@ -229,7 +229,7 @@ class DataTensor:
         self._variable = Variable(tensor, dims)
         self._dims = self._variable.dims
         coord_map = dict(coords)
-        dim_indexes: "OrderedDict[str, BaseIndex]" = OrderedDict()
+        dim_indexes = OrderedDict()
         for dim, size in zip(self._dims, tensor.shape):
             coord_values = coord_map.get(dim)
             dim_indexes[dim] = build_index(coord_values, size, dim, device=tensor.device)

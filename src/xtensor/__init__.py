@@ -2,6 +2,7 @@ from typing import Any
 
 from .datatensor import DataTensor, concat
 from .dataset import Dataset
+from .indexes import arange_index, sorted_unique_index
 
 def open_datatensor(*args: Any, **kwargs: Any) -> DataTensor:
     """Open a DataTensor from inputs accepted by xarray.open_dataarray."""
@@ -44,4 +45,13 @@ def read_feather(*args: Any, dims=None, **kwargs: Any) -> DataTensor:
 from_pandas = DataTensor.from_pandas
 from_dataarray = DataTensor.from_dataarray
 
-__all__ = ["DataTensor", "Dataset", "concat", "open_datatensor", "open_dataset", "read_pickle"]
+__all__ = [
+    "DataTensor",
+    "Dataset",
+    "concat",
+    "open_datatensor",
+    "open_dataset",
+    "read_pickle",
+    "arange_index",
+    "sorted_unique_index",
+]

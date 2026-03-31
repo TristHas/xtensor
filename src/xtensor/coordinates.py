@@ -49,7 +49,7 @@ class Coordinates:
         dim_indexes: Mapping[str, BaseIndex],
         *,
         extra_coords: Optional[Mapping[str, CoordArray]] = None,
-        copy: bool = True,
+        copy: bool = False,
     ) -> None:
         if copy:
             self._dim_indexes: MutableMapping[str, BaseIndex] = OrderedDict(

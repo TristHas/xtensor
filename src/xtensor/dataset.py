@@ -80,7 +80,9 @@ class Dataset:
         self._dim_order = self._compute_dim_order(self._data_vars)
         self._attrs = dict(attrs or {})
 
-    def __getitem__(self, key: str):
+    def __getitem__(self, key: Union[str, Sequence[str]]):
+        if isinstance(key, (list, tuple)):
+            return self._subset_with_data_vars(list(key))
         if self._coords.has_coord(key):
             return self._coord_as_datatensor(key)
         if key in self._data_vars:
@@ -92,10 +94,15 @@ class Dataset:
             coord_tensor = self._convert_to_datatensor(key, value, self.coords)
             self._assign_coord(key, coord_tensor)
             return
+
+        coords = self._coords._dim_indexes
         current_coords = self._coords
-        tensor = self._convert_to_datatensor(key, value, self.coords)
+        tensor = self._convert_to_datatensor(key, value, coords)
         self._validate_variable_dims(key, tensor)
         self._data_vars[key] = tensor
+        if self._can_skip_coords_update(tensor, current_coords):
+            self._promote_coordinate_if_needed(key, tensor)
+            return
         present_dims = set(self._collect_dims(self._data_vars))
         extra_coords = OrderedDict(
             (dim, current_coords.coord_values(dim)) for dim in current_coords.dim_names() if dim not in present_dims
@@ -390,6 +397,19 @@ class Dataset:
         obj._attrs = dict(attrs if attrs is not None else self._attrs)
         return obj
 
+    def _subset_with_data_vars(self, names: Sequence[str]) -> "Dataset":
+        if any(not isinstance(name, str) for name in names):
+            raise TypeError("Dataset selection keys must be strings.")
+        if not names:
+            return self._replace(data_vars=OrderedDict())
+        missing = [name for name in names if name not in self._data_vars]
+        if missing:
+            raise KeyError(missing[0] if len(missing) == 1 else missing)
+        selected = OrderedDict()
+        for name in names:
+            selected[name] = self._data_vars[name]
+        return self._replace(data_vars=selected)
+
     def _coords_from_data_vars(
         self,
         data_vars: Mapping[str, DataTensor],
@@ -400,11 +420,22 @@ class Dataset:
         extras: "OrderedDict[str, CoordArray]" = OrderedDict()
         present_dims = self._collect_dims(data_vars)
         if base_coords is not None:
-            for dim in base_coords.dim_names():
-                if dim in present_dims:
-                    dim_indexes[dim] = base_coords.dim_index(dim)
-            for name, values in base_coords.extra_items().items():
-                extras.setdefault(name, values)
+            base_dim_indexes = getattr(base_coords, "_dim_indexes", None)
+            base_extra = getattr(base_coords, "_extra_coords", None)
+            if base_dim_indexes is None:
+                for dim in base_coords.dim_names():
+                    if dim in present_dims:
+                        dim_indexes[dim] = base_coords.dim_index(dim)
+            else:
+                for dim, index in base_dim_indexes.items():
+                    if dim in present_dims:
+                        dim_indexes.setdefault(dim, index)
+            if base_extra is None:
+                for name, values in base_coords.extra_items().items():
+                    extras.setdefault(name, values)
+            else:
+                for name, values in base_extra.items():
+                    extras.setdefault(name, values)
         for var in data_vars.values():
             for dim, index in var._dim_index_map().items():
                 dim_indexes[dim] = index
@@ -503,6 +534,18 @@ class Dataset:
             for dim in var.dims:
                 dims.setdefault(dim, None)
         return tuple(dims.keys())
+
+    def _can_skip_coords_update(self, tensor: DataTensor, coords: Coordinates) -> bool:
+        tensor_coords = tensor._coords
+        if tensor_coords._extra_coords:
+            return False
+        tensor_indexes = tensor_coords._dim_indexes
+        for dim in tensor.dims:
+            if dim not in coords._dim_indexes:
+                return False
+            if tensor_indexes.get(dim) is not coords._dim_indexes[dim]:
+                return False
+        return True
 
     def _dataset_binary_op(
         self,
