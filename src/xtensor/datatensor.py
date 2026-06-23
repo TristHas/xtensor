@@ -154,13 +154,23 @@ def _expanded_indexer(key: Any, ndim: int) -> Tuple[Any, ...]:
 
 
 def _supports_nan(dtype: torch.dtype) -> bool:
-    return dtype.is_floating_point or dtype.is_complex()
+    return dtype.is_floating_point or dtype.is_complex
 
 
 def _nanmean_op(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
     if not _supports_nan(data.dtype):
         return torch.mean(data, dim=dim, keepdim=keepdim)
     return torch.nanmean(data, dim=dim, keepdim=keepdim)
+
+
+def _nanmedian_op(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:
+    quantile_input = data
+    if data.dtype not in (torch.float32, torch.float64):
+        quantile_input = data.to(torch.float64)
+    quantile_op = torch.nanquantile if _supports_nan(data.dtype) else torch.quantile
+    if dim is None:
+        return quantile_op(quantile_input.reshape(-1), 0.5)
+    return quantile_op(quantile_input, 0.5, dim=dim, keepdim=keepdim)
 
 
 def _nanvar_impl(data: torch.Tensor, dim: Optional[int], keepdim: bool, unbiased: bool) -> torch.Tensor:
@@ -380,6 +390,9 @@ class DataTensor:
 
     def mean(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
         return self._reduce(_nanmean_op, dim=dim, keepdims=keepdims, allow_all_reduce=True)
+
+    def median(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False) -> "DataTensor":
+        return self._reduce(_nanmedian_op, dim=dim, keepdims=keepdims, allow_all_reduce=True)
 
     def std(self, dim: Optional[Union[str, Sequence[str]]] = None, keepdims: bool = False, unbiased: bool = False) -> "DataTensor":
         def _nanstd(data: torch.Tensor, dim: Optional[int] = None, keepdim: bool = False) -> torch.Tensor:

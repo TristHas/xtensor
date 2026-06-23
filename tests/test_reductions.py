@@ -8,10 +8,12 @@ from xtensor import DataTensor
 def test_reductions_align_with_xarray(base_array):
     tensor = DataTensor.from_dataarray(base_array)
     xr_mean = base_array.mean(dim="x")
+    xr_median = base_array.median(dim="x")
     xr_std = base_array.std(dim="y")
     xr_sum_all = base_array.sum()
 
     np.testing.assert_allclose(tensor.mean(dim="x").data.numpy(), xr_mean.data)
+    np.testing.assert_allclose(tensor.median(dim="x").data.numpy(), xr_median.data)
     np.testing.assert_allclose(tensor.std(dim="y").data.numpy(), xr_std.data, atol=1e-6)
     np.testing.assert_allclose(tensor.sum().data.numpy(), xr_sum_all.data, atol=1e-6)
 
@@ -72,6 +74,12 @@ def test_nan_aware_mean_var_std():
         array.mean(dim="x").data,
         equal_nan=True,
     )
+    np.testing.assert_allclose(tensor.median().data.numpy(), array.median().data, equal_nan=True)
+    np.testing.assert_allclose(
+        tensor.median(dim="x").data.numpy(),
+        array.median(dim="x").data,
+        equal_nan=True,
+    )
     np.testing.assert_allclose(
         tensor.std(dim="y", unbiased=False).data.numpy(),
         array.std(dim="y").data,
@@ -98,6 +106,40 @@ def test_nan_reductions_return_nan_when_no_valid_values():
     xr_var = array.var(dim="x")
     xt_var = tensor.var(dim="x")
     np.testing.assert_allclose(xt_var.data.numpy(), xr_var.data, equal_nan=True)
+
+    xr_median = array.median(dim="x")
+    xt_median = tensor.median(dim="x")
+    np.testing.assert_allclose(xt_median.data.numpy(), xr_median.data, equal_nan=True)
+
+
+def test_median_even_length_matches_xarray():
+    data = np.array([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], dtype=np.float32)
+    array = xr.DataArray(data, dims=("x", "y"))
+    tensor = DataTensor.from_dataarray(array)
+
+    reduced = tensor.median(dim="y")
+    expected = array.median(dim="y")
+    np.testing.assert_allclose(reduced.data.numpy(), expected.data)
+
+
+def test_median_keepdims_preserves_dimension_metadata():
+    data = np.array([[1.0, 4.0], [2.0, 3.0]], dtype=np.float32)
+    tensor = DataTensor(data, {"x": [10, 20], "y": ["a", "b"]}, ("x", "y"))
+
+    kept = tensor.median(dim="x", keepdims=True)
+    assert kept.dims == tensor.dims
+    assert kept.shape == (1, 2)
+    np.testing.assert_allclose(np.asarray(kept.coords["x"]), np.asarray([10]))
+
+
+def test_median_promotes_integral_inputs_like_xarray():
+    data = np.array([1, 2, 3, 4], dtype=np.int64)
+    array = xr.DataArray(data, dims=("x",))
+    tensor = DataTensor.from_dataarray(array)
+
+    reduced = tensor.median()
+    assert reduced.data.dtype == torch.float64
+    np.testing.assert_allclose(reduced.data.numpy(), array.median().data)
 
 
 def test_any_reduction_matches_torch():
